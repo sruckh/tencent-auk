@@ -1,0 +1,33 @@
+# Ignore all dot directories and dot files (except .gitignore)
+.*
+!.gitignore
+
+# Agent instructions (managed locally / per-machine)
+CLAUDE.md
+AGENTS.md
+
+# Virtual environments & caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+ENV/
+
+# Checkpoints and volume mounts
+ckpts/
+/runpod-volume/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+
+# Output & test artifacts
+*.wav
+*.mp3
+*.flac
+*.ogg
+output/
+test_output/
