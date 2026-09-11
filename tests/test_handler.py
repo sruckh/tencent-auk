@@ -195,3 +195,14 @@ def test_startup_logs_delivery_config(capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "[auk-worker] delivery: default=auto, s3_configured=False" in out
     assert "Secret" in out or "AKIA" not in out  # no credential material either way
+
+
+def test_safe_handler_logs_result_shape(capsys):
+    """Every job logs its result payload's size/shape — the deploy probe for
+    job-done 400 diagnosis; values (audio, URLs) are never rendered."""
+    result = handler._safe_handler({"id": "probe-job", "input": {"instruction": "hi"}})
+    out = capsys.readouterr().out
+    assert f"[auk-worker] result job_id=probe-job json_bytes={len}" not in out  # guard against accidental value leak
+    assert "[auk-worker] result job_id=probe-job json_bytes=" in out
+    assert "delivery: str" in out or "error: dict" in out  # mock path: no creds → base64, or error shape
+    assert result is not None

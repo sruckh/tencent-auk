@@ -85,20 +85,49 @@ def handler(job: dict[str, object]) -> dict[str, object]:
     return {**delivery, **metadata}
 
 
+def _log_result_shape(job_id: str, result: dict[str, object]) -> None:
+    """Deploy probe: prove the exact payload the SDK will serialize. Logs
+    field names/types and JSON byte size — never audio data, URLs, or the
+    presign signature. Catches the two silent killers of job-done delivery:
+    non-serializable values and NaN/Infinity (json.dumps emits bare ``NaN``,
+    which strict gateways reject with 400)."""
+    try:
+        rendered = json.dumps(result, ensure_ascii=False)
+    except (TypeError, ValueError) as exc:
+        print(
+            f"[auk-worker] result job_id={job_id} NOT JSON-SERIALIZABLE: "
+            f"{type(exc).__name__}: {exc}; fields={sorted(result)}",
+            flush=True,
+        )
+        return
+    flags = []
+    if "NaN" in rendered or "Infinity" in rendered:
+        flags.append("CONTAINS-NAN/INFINITY")
+    print(
+        f"[auk-worker] result job_id={job_id} json_bytes={len(rendered)} "
+        f"fields={{ {', '.join(f'{k}: {type(v).__name__}' for k, v in sorted(result.items()))} }}"
+        f"{' | ' + ' '.join(flags) if flags else ''}",
+        flush=True,
+    )
+
+
 def _safe_handler(job: dict[str, object]) -> dict[str, object]:
     """Daemon-safe wrapper: an unexpected exception produces a crash dump and a
     structured error — the process never dies from a job (PRD NFR 2)."""
     job_id = str((job or {}).get("id") or "local")
+    result: dict[str, object]
     try:
-        return handler(job)
+        result = handler(job)
     except Exception as exc:  # noqa: BLE001 — last-resort isolation
         _crash_dump(job_id, exc)
-        return {
+        result = {
             "error": {
                 "code": "inference_failed",
                 "message": "unhandled worker exception (see crash dump)",
             }
         }
+    _log_result_shape(job_id, result)
+    return result
 
 
 # ---------------------------------------------------------------------------
