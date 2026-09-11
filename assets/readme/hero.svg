@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="360" viewBox="0 0 1200 360"
+     role="img" aria-labelledby="hero-title hero-desc">
+  <title id="hero-title">tencent-auk — RunPod Serverless worker for Tencent AuK</title>
+  <desc id="hero-desc">One JSON job in, speech audio out: the worker validates the request, runs AuK-Flash or AuK-Base, and returns the waveform as base64 or a presigned B2/S3 URL.</desc>
+
+  <defs>
+    <linearGradient id="panel-sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#13202F"/>
+      <stop offset="1" stop-color="#0F1927"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="360" rx="18" fill="#0C1420"/>
+
+  <!-- ======================= title block ======================= -->
+  <g id="title-block" transform="translate(64 58)">
+    <text x="0" y="0" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" letter-spacing="3" fill="#8CA0B8">RUNPOD SERVERLESS · AUDIO INFERENCE API</text>
+
+    <text x="0" y="72" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+          font-size="64" font-weight="700" fill="#E9EFF6">tencent-<tspan fill="#3ECF9A">auk</tspan></text>
+
+    <text x="0" y="116" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+          font-size="24" fill="#C7D3E0">Five AuK speech capabilities behind one JSON job.</text>
+    <text x="0" y="148" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+          font-size="24" fill="#C7D3E0">TTS, speech editing, enhancement &amp; separation.</text>
+
+    <!-- waveform motif -->
+    <g id="waveform" transform="translate(2 172)" fill="#3ECF9A">
+      <rect x="0"    y="10" width="5" height="10" rx="2" opacity="0.45"/>
+      <rect x="9"    y="4"  width="5" height="22" rx="2" opacity="0.7"/>
+      <rect x="18"   y="0"  width="5" height="30" rx="2"/>
+      <rect x="27"   y="7"  width="5" height="16" rx="2" opacity="0.6"/>
+      <rect x="36"   y="2"  width="5" height="26" rx="2" opacity="0.85"/>
+      <rect x="45"   y="9"  width="5" height="12" rx="2" opacity="0.45"/>
+      <rect x="54"   y="4"  width="5" height="22" rx="2" opacity="0.7"/>
+      <rect x="63"   y="0"  width="5" height="30" rx="2"/>
+      <rect x="72"   y="8"  width="5" height="14" rx="2" opacity="0.5"/>
+      <rect x="81"   y="3"  width="5" height="24" rx="2" opacity="0.8"/>
+      <rect x="90"   y="10" width="5" height="10" rx="2" opacity="0.4"/>
+    </g>
+
+    <!-- capability chips -->
+    <g id="chips" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">
+      <rect x="0" y="216" width="150" height="34" rx="8" fill="#16243A" stroke="#24384F"/>
+      <text x="75"  y="238" text-anchor="middle" fill="#C7D3E0">8 task modes</text>
+
+      <rect x="162" y="216" width="160" height="34" rx="8" fill="#16243A" stroke="#24384F"/>
+      <text x="242" y="238" text-anchor="middle" fill="#F2A65A">Flash · 4-step</text>
+
+      <rect x="334" y="216" width="184" height="34" rx="8" fill="#16243A" stroke="#24384F"/>
+      <text x="426" y="238" text-anchor="middle" fill="#C7D3E0">Base · NFE 16–64</text>
+    </g>
+
+    <text x="0" y="286" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="17" fill="#66788F">vendored upstream Tencent-Hunyuan/AuK · bc84b75 · MIT</text>
+  </g>
+
+  <!-- ======================= job pipeline panel ======================= -->
+  <g id="pipeline-panel" transform="translate(696 40)">
+    <rect width="440" height="280" rx="14" fill="url(#panel-sheen)" stroke="#1E3049"/>
+
+    <g id="pipe-node-1" transform="translate(28 28)">
+      <rect width="384" height="52" rx="10" fill="#16243A" stroke="#24384F"/>
+      <text x="18" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="16" fill="#3ECF9A">1</text>
+      <text x="38" y="24" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+            font-size="20" font-weight="600" fill="#E9EFF6">JSON job</text>
+      <text x="38" y="43" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">{"instruction": "…"}</text>
+    </g>
+    <path d="M 220 80 L 220 92" stroke="#3ECF9A" stroke-width="2"/>
+    <path d="M 215 88 L 220 94 L 225 88" fill="none" stroke="#3ECF9A" stroke-width="2"/>
+
+    <g id="pipe-node-2" transform="translate(28 96)">
+      <rect width="384" height="52" rx="10" fill="#16243A" stroke="#24384F"/>
+      <text x="18" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="16" fill="#3ECF9A">2</text>
+      <text x="38" y="24" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+            font-size="20" font-weight="600" fill="#E9EFF6">validate</text>
+      <text x="38" y="43" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">limits · guardrails · ingest</text>
+    </g>
+    <path d="M 220 148 L 220 160" stroke="#3ECF9A" stroke-width="2"/>
+    <path d="M 215 156 L 220 162 L 225 156" fill="none" stroke="#3ECF9A" stroke-width="2"/>
+
+    <g id="pipe-node-3" transform="translate(28 164)">
+      <rect width="384" height="52" rx="10" fill="#16243A" stroke="#2E4A3A"/>
+      <text x="18" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="16" fill="#3ECF9A">3</text>
+      <text x="38" y="24" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+            font-size="20" font-weight="600" fill="#E9EFF6">generate</text>
+      <text x="38" y="43" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">AukInfer · Flash / Base</text>
+      <!-- waveform sparkline inside node 3 -->
+      <g transform="translate(296 16)" fill="#3ECF9A">
+        <rect x="0"  y="8" width="4" height="10" rx="1.5" opacity="0.5"/>
+        <rect x="7"  y="4" width="4" height="18" rx="1.5" opacity="0.8"/>
+        <rect x="14" y="0" width="4" height="26" rx="1.5"/>
+        <rect x="21" y="6" width="4" height="14" rx="1.5" opacity="0.6"/>
+        <rect x="28" y="3" width="4" height="20" rx="1.5" opacity="0.85"/>
+        <rect x="35" y="9" width="4" height="8"  rx="1.5" opacity="0.45"/>
+      </g>
+    </g>
+    <path d="M 220 216 L 220 228" stroke="#3ECF9A" stroke-width="2"/>
+    <path d="M 215 224 L 220 230 L 225 224" fill="none" stroke="#3ECF9A" stroke-width="2"/>
+
+    <g id="pipe-node-4" transform="translate(28 232)">
+      <rect width="384" height="36" rx="10" fill="#16243A" stroke="#24384F"/>
+      <text x="18" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="16" fill="#3ECF9A">4</text>
+      <text x="38" y="24" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+            font-size="20" font-weight="600" fill="#E9EFF6">deliver</text>
+      <text x="126" y="24" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">presigned URL · base64</text>
+    </g>
+  </g>
+</svg>

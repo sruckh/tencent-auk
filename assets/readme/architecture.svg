@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="440" viewBox="0 0 1200 440"
+     role="img" aria-labelledby="arch-title arch-desc">
+  <title id="arch-title">Worker architecture — bootstrap once, then a per-job hot path</title>
+  <desc id="arch-desc">At import, the worker resolves checkpoints offline-first from the RunPod network volume and builds the warm AuK engines. Per job, it validates the payload, synthesizes via AukInfer, and delivers the WAV as base64 or a presigned B2/S3 URL.</desc>
+
+  <rect width="1200" height="440" rx="18" fill="#0C1420"/>
+
+  <!-- ================= phase 1: bootstrap ================= -->
+  <g id="phase-bootstrap">
+    <text x="64" y="66" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" letter-spacing="2" fill="#8CA0B8">BOOTSTRAP · IMPORT TIME, ONCE PER WORKER</text>
+
+    <g id="bs-volume" transform="translate(64 92)">
+      <rect width="300" height="110" rx="12" fill="#121D2E" stroke="#1E3049"/>
+      <text x="20" y="34" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+            font-size="20" font-weight="600" fill="#E9EFF6">Network volume</text>
+      <text x="20" y="62" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">HF hub cache · refs/main</text>
+      <text x="20" y="88" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">CKPT_ROOT fallback layout</text>
+    </g>
+
+    <path d="M 372 147 L 404 147" stroke="#3ECF9A" stroke-width="2"/>
+    <path d="M 398 142 L 406 147 L 398 152" fill="none" stroke="#3ECF9A" stroke-width="2"/>
+
+    <g id="bs-resolve" transform="translate(412 92)">
+      <rect width="330" height="110" rx="12" fill="#121D2E" stroke="#1E3049"/>
+      <text x="20" y="34" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+            font-size="20" font-weight="600" fill="#E9EFF6">Resolve components</text>
+      <text x="20" y="62" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">offline-first · file checks</text>
+      <text x="20" y="88" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#F2A65A">AUK_OFFLINE=1 → fail fast</text>
+    </g>
+
+    <path d="M 750 147 L 782 147" stroke="#3ECF9A" stroke-width="2"/>
+    <path d="M 776 142 L 784 147 L 776 152" fill="none" stroke="#3ECF9A" stroke-width="2"/>
+
+    <g id="bs-engines" transform="translate(790 92)">
+      <rect width="346" height="110" rx="12" fill="#121D2E" stroke="#1E3049"/>
+      <text x="20" y="34" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+            font-size="20" font-weight="600" fill="#E9EFF6">Warm engines</text>
+      <text x="20" y="62" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">AukInfer Flash + Base · bf16</text>
+      <text x="20" y="88" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">Qwen2.5-Omni-3B encoder</text>
+    </g>
+  </g>
+
+  <!-- divider -->
+  <line x1="64" y1="234" x2="1136" y2="234" stroke="#1E3049" stroke-width="1.5"/>
+
+  <!-- ================= phase 2: per job ================= -->
+  <g id="phase-job">
+    <text x="64" y="272" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+          font-size="18" letter-spacing="2" fill="#8CA0B8">PER JOB · HOT PATH, NO MODEL LOADS</text>
+
+    <g id="job-input" transform="translate(64 298)">
+      <rect width="230" height="100" rx="12" fill="#121D2E" stroke="#1E3049"/>
+      <text x="20" y="34" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+            font-size="20" font-weight="600" fill="#E9EFF6">RunPod job</text>
+      <text x="20" y="62" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">task · audio · seed</text>
+    </g>
+
+    <path d="M 302 348 L 328 348" stroke="#3ECF9A" stroke-width="2"/>
+    <path d="M 322 343 L 330 348 L 322 353" fill="none" stroke="#3ECF9A" stroke-width="2"/>
+
+    <g id="job-validate" transform="translate(331 298)">
+      <rect width="235" height="100" rx="12" fill="#121D2E" stroke="#1E3049"/>
+      <text x="20" y="34" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+            font-size="20" font-weight="600" fill="#E9EFF6">Validate</text>
+      <text x="20" y="62" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">15 MB decoded cap</text>
+      <text x="20" y="86" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">single-pass · 10 s</text>
+    </g>
+
+    <path d="M 574 348 L 600 348" stroke="#3ECF9A" stroke-width="2"/>
+    <path d="M 594 343 L 602 348 L 594 353" fill="none" stroke="#3ECF9A" stroke-width="2"/>
+
+    <g id="job-synthesize" transform="translate(603 298)">
+      <rect width="255" height="100" rx="12" fill="#121D2E" stroke="#2E4A3A"/>
+      <text x="20" y="34" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+            font-size="20" font-weight="600" fill="#E9EFF6">Synthesize</text>
+      <text x="20" y="62" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">messages → generate()</text>
+      <text x="20" y="86" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">PCM_16 WAV in BytesIO</text>
+    </g>
+
+    <path d="M 866 348 L 892 348" stroke="#3ECF9A" stroke-width="2"/>
+    <path d="M 886 343 L 894 348 L 886 353" fill="none" stroke="#3ECF9A" stroke-width="2"/>
+
+    <g id="job-deliver" transform="translate(895 298)">
+      <rect width="240" height="100" rx="12" fill="#121D2E" stroke="#1E3049"/>
+      <text x="20" y="34" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif"
+            font-size="20" font-weight="600" fill="#E9EFF6">Deliver</text>
+      <text x="20" y="62" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">auto · s3 · base64</text>
+      <text x="20" y="86" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+            font-size="18" fill="#8CA0B8">presigned GET · 24 h</text>
+    </g>
+  </g>
+
+  <!-- footer metadata -->
+  <text x="64" y="424" font-family="ui-monospace, SFMono-Regular, Menlo, monospace"
+        font-size="17" fill="#66788F">missing components → one bounded download, then reused on every cold start</text>
+</svg>

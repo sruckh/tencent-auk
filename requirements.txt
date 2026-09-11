@@ -1,0 +1,18 @@
+# Worker dependencies. The torch family comes from the cu128 index in
+# Dockerfile and deliberately sits OUTSIDE upstream's declared 2.7 range, so
+# the vendored package installs --no-deps and its remaining inference deps are
+# owned here — ranges mirror src/pyproject.toml. No UI/training/test extras.
+runpod==1.12.0
+boto3==1.43.86
+botocore>=1.36,<2          # hard floor: when_required checksum config (B2 fix)
+huggingface_hub>=0.34,<1   # native offline lookup + designated bootstrap fallback
+soundfile>=0.13            # in-memory PCM WAV serialization
+
+# Upstream inference dependencies (src/pyproject.toml), worker-owned because
+# the torch deviation forces --no-deps on the vendored package itself.
+transformers>=4.52.0,<5    # Qwen2.5-Omni support landed in 4.52; validated on 4.57
+qwen-omni-utils>=0.0.9
+omegaconf>=2.3.0
+torchdiffeq
+x_transformers>=1.31.14    # pulls einops (also a flash-attn runtime dep)
+safetensors
