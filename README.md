@@ -44,6 +44,14 @@ without credentials it falls back to inline base64 WAV (`size_bytes`, `duration_
 effective `nfe` ride along as metadata). Prefer S3 for anything longer than a few seconds — RunPod's result
 gateway rejects very large inline payloads.
 
+### Cold starts & `/runsync`
+
+The first job after a worker spawn waits through model loading (~90 s), which exceeds the default `/runsync`
+sync window — the gateway returns `IN_PROGRESS`, and the worker's later delivery to the expired sync record is
+rejected (the job then reports completed with **no output**). For the first job after any cold boot, either
+raise the window with `?wait=300000` (5 min, milliseconds) or use `/run` + `/status/:id` polling; a warm worker
+answers `/runsync` in a couple of seconds with no options needed.
+
 ## Endpoints
 
 The worker registers **one** RunPod handler; the platform routes below are provisioned automatically for every
