@@ -177,8 +177,10 @@ WAV in memory → delivery. Temp files are removed in `finally`; the handler nev
 
 **Variants.** AuK-Flash runs its distilled recipe — exactly 4 steps, CFG 0.0 — regardless of the accepted input
 range `1..8`; metadata reports the effective `nfe=4`. AuK-Base honors `nfe` 16..64 (default 32) and `cfg_scale`
-1.0..5.0 (default 2.0). At ≥ 20 GiB VRAM both variants load eagerly; below that the default loads first and the
-other loads lazily on first use.
+1.0..5.0 (default 2.0). Each resident variant costs ~12 GiB — every `AukInfer` owns its own encoder + VAE +
+DiT — so placement is measured at startup: the default variant loads eagerly and the second joins only if
+≥13 GiB stay free. On a 24 GB GPU that means **one** variant (requests for the other return a structured
+error); on 48 GB+ cards both stay resident.
 
 ## Development
 

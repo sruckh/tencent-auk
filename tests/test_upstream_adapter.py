@@ -45,7 +45,9 @@ class Tensor:
 
 
 @pytest.fixture
-def real_engine(tmp_path, monkeypatch):
+def make_real_engine(tmp_path, monkeypatch):
+    """Factory: bootstrap config (free VRAM, second-build failure) is frozen
+    at call time because the module bootstraps at import."""
     explicit(tmp_path / "ckpts")
     monkeypatch.setenv("CKPT_ROOT", str(tmp_path / "ckpts"))
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
@@ -54,11 +56,19 @@ def real_engine(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
     monkeypatch.setenv("DEFAULT_MODEL_VARIANT", "flash")
-    state = SimpleNamespace(builds=[], calls=[], sample_rate=48000, fail=False, tensor=Tensor())
+    state = SimpleNamespace(builds=[], calls=[], sample_rate=48000, fail=False, tensor=Tensor(),
+                            free_gib=24.0, fail_second_build_with=None)
+
+    class OutOfMemoryError(RuntimeError):
+        pass
+
     torch = SimpleNamespace(
+        OutOfMemoryError=OutOfMemoryError,
         cuda=SimpleNamespace(
             is_available=lambda: True,
             get_device_properties=lambda _: SimpleNamespace(name="fake GPU", total_memory=24 * 1024**3),
+            mem_get_info=lambda: (int(state.free_gib * 1024**3), 24 * 1024**3),
+            empty_cache=lambda: None,
         ),
         set_float32_matmul_precision=lambda value: None,
     )
@@ -66,6 +76,8 @@ def real_engine(tmp_path, monkeypatch):
 
     class AukInfer:
         def __init__(self, config_path, ckpt_path, *, device=None, dtype="bf16", qwen_path=None):
+            if state.fail_second_build_with is not None and len(state.builds) >= 1:
+                raise state.fail_second_build_with
             assert Path(config_path).is_file()
             assert Path(ckpt_path).is_file()
             assert Path(ckpt_path).with_name("vae.safetensors").is_file()
@@ -98,11 +110,18 @@ def real_engine(tmp_path, monkeypatch):
             out.writeframes(b"".join(struct.pack("<h", int(x * 32767)) for x in data))
 
     monkeypatch.setitem(sys.modules, "soundfile", SimpleNamespace(write=write))
-    spec = importlib.util.spec_from_file_location("_real_engine_gate", ROOT / "engine.py")
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module, state
+
+    def _make(*, free_gib=24.0, fail_second_build=False):
+        if fail_second_build:
+            state.fail_second_build_with = OutOfMemoryError("CUDA out of memory")
+        state.free_gib = free_gib
+        spec = importlib.util.spec_from_file_location("_real_engine_gate", ROOT / "engine.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module, state
+
+    return _make
 
 
 def engine_env(name):
@@ -138,8 +157,8 @@ def test_flash_recipe_is_pinned_in_source():
     assert assignments["nfe"] == 4 and assignments["cfg_strength"] == 0.0
 
 
-def test_constructor_resolves_each_variant_and_encoder(real_engine):
-    module, state = real_engine
+def test_constructor_resolves_each_variant_and_encoder(make_real_engine):
+    module, state = make_real_engine()
     assert len(state.builds) == 2
     assert {Path(row[1]).name for row in state.builds} == {"auk_flash.safetensors", "auk_base.safetensors"}
     assert all(Path(row[2]).name == "Qwen2.5-Omni-3B" for row in state.builds)
@@ -147,9 +166,31 @@ def test_constructor_resolves_each_variant_and_encoder(real_engine):
     assert len(state.builds) == 2
 
 
+def test_low_free_vram_builds_primary_only(make_real_engine):
+    """24 GB-class cards fit one AukInfer (~12 GiB); the second stays lazy."""
+    module, state = make_real_engine(free_gib=5.0)
+    assert len(state.builds) == 1
+    wav, meta = module.synthesize(req(gen_seconds=0.5))
+    assert meta["model_variant"] == "flash" and len(state.builds) == 1
+
+
+def test_second_variant_loads_lazily_on_request(make_real_engine):
+    module, state = make_real_engine(free_gib=5.0)
+    module.synthesize(req(model_variant="base", gen_seconds=0.5))
+    assert len(state.builds) == 2
+    assert Path(state.builds[1][1]).name == "auk_base.safetensors"
+
+
+def test_oom_on_second_build_degrades_to_single_variant(make_real_engine):
+    module, state = make_real_engine(free_gib=40.0, fail_second_build=True)
+    assert len(state.builds) == 1  # import completed with the primary only
+    wav, meta = module.synthesize(req(gen_seconds=0.5))
+    assert meta["model_variant"] == "flash"
+
+
 @pytest.mark.parametrize("variant,nfe,cfg", [("flash", 8, 5), ("base", 64, 3)])
-def test_per_request_controls_and_returned_sample_rate(real_engine, variant, nfe, cfg):
-    module, state = real_engine
+def test_per_request_controls_and_returned_sample_rate(make_real_engine, variant, nfe, cfg):
+    module, state = make_real_engine()
     wav, meta = module.synthesize(req(model_variant=variant, nfe=nfe, cfg_scale=cfg, seed=73, gen_seconds=0.5))
     call = state.calls[-1]
     assert call.seed == 73 and call.seconds == 0.5
@@ -164,8 +205,8 @@ def test_per_request_controls_and_returned_sample_rate(real_engine, variant, nfe
         assert audio.getnframes() == 12000
 
 
-def test_zero_shot_uses_prompt_audio_and_supported_transcript_text(real_engine):
-    module, state = real_engine
+def test_zero_shot_uses_prompt_audio_and_supported_transcript_text(make_real_engine):
+    module, state = make_real_engine()
     clip = b"reference bytes"
     module.synthesize(req(task="zero_shot_tts", prompt_audio=base64.b64encode(clip).decode(),
                           prompt_text="Exact reference words.", gen_seconds=3))
@@ -178,23 +219,23 @@ def test_zero_shot_uses_prompt_audio_and_supported_transcript_text(real_engine):
     assert not Path(call.clips[0]).exists()
 
 
-def test_source_edit_preserves_none_duration(real_engine):
-    module, state = real_engine
+def test_source_edit_preserves_none_duration(make_real_engine):
+    module, state = make_real_engine()
     module.synthesize(req(task="content_edit", audio="YXVkaW8="))
     assert state.calls[-1].seconds is None
     assert state.calls[-1].clip_bytes == [b"audio"]
     assert not Path(state.calls[-1].clips[0]).exists()
 
 
-def test_text_only_gets_explicit_default_duration(real_engine):
-    module, state = real_engine
+def test_text_only_gets_explicit_default_duration(make_real_engine):
+    module, state = make_real_engine()
     module.synthesize(req())
     assert state.calls[-1].seconds == 7.0
     assert state.calls[-1].clips == []
 
 
-def test_failure_scrubs_message_and_cleans_temp_audio(real_engine):
-    module, state = real_engine
+def test_failure_scrubs_message_and_cleans_temp_audio(make_real_engine):
+    module, state = make_real_engine()
     state.fail = True
     with pytest.raises(module.EngineError) as exc:
         module.synthesize(req(task="enhancement", audio="YXVkaW8="))
@@ -204,22 +245,22 @@ def test_failure_scrubs_message_and_cleans_temp_audio(real_engine):
 
 
 @pytest.mark.parametrize("rate", [0, -1, True, 48000.5])
-def test_invalid_rate_rejected(real_engine, rate):
-    module, state = real_engine
+def test_invalid_rate_rejected(make_real_engine, rate):
+    module, state = make_real_engine()
     state.sample_rate = rate
     with pytest.raises(module.EngineError):
         module.synthesize(req())
 
 
-def test_non_mono_rejected_instead_of_flattening_channels(real_engine):
-    module, state = real_engine
+def test_non_mono_rejected_instead_of_flattening_channels(make_real_engine):
+    module, state = make_real_engine()
     state.tensor.shape = (2, 6000)
     with pytest.raises(module.EngineError):
         module.synthesize(req())
 
 
-def test_empty_audio_rejected(real_engine):
-    module, state = real_engine
+def test_empty_audio_rejected(make_real_engine):
+    module, state = make_real_engine()
     state.tensor = Tensor(0)
     with pytest.raises(module.EngineError):
         module.synthesize(req())

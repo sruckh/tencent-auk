@@ -24,7 +24,7 @@ from typing import Any
 
 SAMPLE_RATE = 24000            # pinned: 24 kHz, mono, 16-bit PCM WAV
 MOCK_ENV = "AUK_TEST_MOCK_ENGINE"
-VRAM_DUAL_VARIANT_GB = 20.0    # ≥ 20 GiB → both DiT variants resident (ADR 002)
+SECOND_VARIANT_MIN_FREE_GIB = 13.0  # measured: one AukInfer ≈ 12 GiB (owns encoder+VAE+DiT)
 CKPT_ENV = "CKPT_ROOT"
 DEFAULT_HUB_CACHE = "/runpod-volume/huggingface-cache/hub"
 DEFAULT_CKPT_ROOT = "/runpod-volume/ckpts"
@@ -314,16 +314,31 @@ else:
     _CKPT_ROOT = str(Path(os.environ.get(CKPT_ENV, DEFAULT_CKPT_ROOT)).resolve())  # pyright: ignore[reportConstantRedefinition]
     torch.set_float32_matmul_precision("high")
     _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    if _DEVICE == "cuda":
+
+    def _free_gib() -> float:
         try:
-            total_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-            eager_variants = ["flash", "base"] if total_gb >= VRAM_DUAL_VARIANT_GB else [_default_variant()]
-        except Exception:
-            eager_variants = [_default_variant()]
-    else:
-        eager_variants = [_default_variant()]
-    for _variant in eager_variants:
-        _ENGINES[_variant] = _build_engine(_variant)
+            return torch.cuda.mem_get_info()[0] / (1024 ** 3)
+        except Exception:  # never block startup on telemetry
+            return 0.0
+
+    # Measured placement (2026-09-11 deploy evidence): each AukInfer owns its
+    # full encoder+VAE+DiT (~12 GiB bf16), so dual residency needs ~25 GiB
+    # free. Build the default first, then the second only if it truly fits;
+    # an OOM mid-build degrades to single-variant instead of crashing.
+    primary = _default_variant()
+    secondary = "base" if primary == "flash" else "flash"
+    _ENGINES[primary] = _build_engine(primary)
+    if _DEVICE == "cuda" and _free_gib() >= SECOND_VARIANT_MIN_FREE_GIB:
+        try:
+            _ENGINES[secondary] = _build_engine(secondary)
+        except torch.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            print(
+                f"[auk-engine] '{secondary}' did not fit in free VRAM "
+                f"({_free_gib():.1f} GiB left) — single-variant mode "
+                f"(requests for it fail structured)",
+                flush=True,
+            )
     _log_system_info()
 
     def synthesize(req) -> tuple[bytes, dict[str, object]]:
