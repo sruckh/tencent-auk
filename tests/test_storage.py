@@ -98,6 +98,20 @@ def test_resolve_delivery_auto_env_s3_without_creds_falls_back():
     assert resolve_delivery("auto", config) == "base64"
 
 
+def test_resolve_delivery_auto_prefers_s3_when_configured():
+    """Pin s3-storage.md: auto prefers presigned S3 when credentials exist."""
+    assert resolve_delivery("auto", cfg()) == "s3"
+    assert resolve_delivery(None, cfg()) == "s3"
+
+
+def test_resolve_delivery_deployment_s3_without_creds_raises():
+    """AUDIO_DELIVERY=s3 adopts forced-s3 semantics — fail loudly."""
+    config = cfg(AUDIO_DELIVERY="s3", AWS_ACCESS_KEY_ID=None, AWS_SECRET_ACCESS_KEY=None)
+    with pytest.raises(DeliveryError) as excinfo:
+        resolve_delivery(None, config)
+    assert excinfo.value.code == "s3_credentials_missing"
+
+
 # ---------------------------------------------------------------------------
 # Key building + sanitization
 # ---------------------------------------------------------------------------
@@ -169,6 +183,14 @@ def test_deliver_auto_without_creds_returns_base64():
     config = cfg(AWS_ACCESS_KEY_ID=None, AWS_SECRET_ACCESS_KEY=None)
     result = deliver(WAV, "job_1", "auto", cfg=config)
     assert result["delivery"] == "base64"
+
+
+def test_deliver_auto_uses_s3_when_configured():
+    record = {}
+    result = deliver(WAV, "job_1", "auto", cfg=cfg(), client_factory=make_factory(record))
+    assert result["delivery"] == "s3"
+    assert record["put"]["Body"] == WAV
+    assert result["audio_url"].startswith("https://signed.example/")
 
 
 def test_deliver_s3_fields_and_upload():

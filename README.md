@@ -29,14 +29,20 @@ curl -X POST "https://api.runpod.ai/v2/<endpoint-id>/runsync" \
   -d '{
     "input": {
       "task": "instruct_tts",
-      "instruction": "A warm narrator reads the news.",
-      "gen_seconds": 6.0
+      "instruction": "Based on the following description: \"A warm, professional narrator with a medium pace.\", generate speech content \"RunPod serverless is up and running.\".",
+      "gen_seconds": 2.5
     }
   }'
 ```
 
-**3. Get audio.** With `AUDIO_DELIVERY=auto` and no S3 credentials configured, the result arrives inline as
-base64 WAV (`size_bytes`, `duration_seconds`, `sample_rate`, and the effective `nfe` ride along as metadata).
+AuK has **no separate text field** — the words to speak travel inside `instruction` using the upstream cookbook
+templates: instruct TTS is `Based on the following description: "…", generate speech content "…".` and zero-shot
+is `Say the following with the same voice: "…".`
+
+**3. Get audio.** With credentials configured, `auto` delivery uploads to B2/S3 and returns a presigned URL;
+without credentials it falls back to inline base64 WAV (`size_bytes`, `duration_seconds`, `sample_rate`, and the
+effective `nfe` ride along as metadata). Prefer S3 for anything longer than a few seconds — RunPod's result
+gateway rejects very large inline payloads.
 
 ## Endpoints
 
@@ -70,7 +76,7 @@ Fail-fast validation with a closed error set; first failing rule wins.
 | `nfe` | int | 4 (flash) / 32 (base) | flash accepts `1..8`; base `16..64` |
 | `cfg_scale` | number | 0.0 (flash) / 2.0 (base) | forced to `0.0` for flash; base `1.0..5.0` |
 | `seed` | int | — | ≥ 0; forwarded for reproducibility |
-| `response_delivery` | string | `"auto"` | `auto` \| `s3` \| `base64` |
+| `response_delivery` | string | `"auto"` | `auto` \| `s3` \| `base64`; `auto` prefers presigned S3 when credentials are configured (RunPod rejects very large inline results), else base64 |
 
 Audio fields accept base64 (optionally `data:audio/…;base64,`-prefixed) or `http(s)://` URLs. Each clip is
 decoded **exactly once**; the 15 MB cap applies to decoded bytes; URL ingest streams with a 10 s timeout.
@@ -97,10 +103,13 @@ refuses to guess).
 One top-level object; metadata (`task_executed`, `model_variant`, `nfe`, `sample_rate`, `duration_seconds`,
 `size_bytes`) is merged in. `sample_rate` is the rate the model returns per request (the test mock runs 24 kHz).
 
-**Base64** — `delivery="base64"`, `audio_base64`, `size_bytes`.
+**Base64** — `delivery="base64"`, `audio_base64`, `size_bytes`. Only safe for short clips: RunPod's result
+gateway rejects result payloads beyond roughly 10 MB with a silent 400 (the job then reports completed with no
+output).
 
 **S3** — `delivery="s3"`, `audio_url`, `bucket`, `key`, `size_bytes`, `url_expires_in`, `url_expires_at`.
 Keys follow `{prefix}{YYYY}/{MM}/{DD}/{sanitized_job_id}-{uuid4}.wav`; presigned GETs default to 24 h.
+`auto` picks this whenever credentials are configured.
 
 **Failure** — structured envelope, no credential material, no audio bytes:
 

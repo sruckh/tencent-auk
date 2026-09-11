@@ -156,20 +156,19 @@ def default_client_factory(cfg: StorageConfig):
 
 
 def resolve_delivery(response_delivery: str | None, cfg: StorageConfig) -> str:
-    """``auto`` defers to the env default and never raises; forced ``s3``
-    without credentials raises ``s3_credentials_missing`` (fail loudly)."""
-    requested = response_delivery or "auto"
+    """Per-request ``s3``/``base64`` wins; pure ``auto`` prefers presigned S3
+    when credentials are configured (RunPod's job-done gateway rejects very
+    large inline payloads) and falls back to base64 otherwise — ``auto``
+    never raises. Deployment ``AUDIO_DELIVERY=s3`` adopts forced-s3 semantics
+    (raises ``s3_credentials_missing`` when unconfigured)."""
+    requested = response_delivery or cfg.delivery_default
     if requested == "s3":
         if not cfg.s3_configured():
             raise DeliveryError("s3_credentials_missing", "S3 delivery requested but storage credentials are not configured")
         return "s3"
     if requested == "base64":
         return "base64"
-
-    default = cfg.delivery_default
-    if default == "s3" and cfg.s3_configured():
-        return "s3"
-    return "base64"  # auto never raises on missing credentials
+    return "s3" if cfg.s3_configured() else "base64"  # auto: pin s3-storage.md
 
 
 def _expires_at(presign_expiry: int, now: _dt.datetime) -> str:
