@@ -57,7 +57,8 @@ def make_real_engine(tmp_path, monkeypatch):
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
     monkeypatch.setenv("DEFAULT_MODEL_VARIANT", "flash")
     state = SimpleNamespace(builds=[], calls=[], sample_rate=48000, fail=False, tensor=Tensor(),
-                            free_gib=24.0, fail_second_build_with=None)
+                            free_gib=24.0, fail_second_build_with=None,
+                            torch_alloc_gib=12.1, torch_peak_gib=13.4)
 
     class OutOfMemoryError(RuntimeError):
         pass
@@ -68,6 +69,8 @@ def make_real_engine(tmp_path, monkeypatch):
             is_available=lambda: True,
             get_device_properties=lambda _: SimpleNamespace(name="fake GPU", total_memory=24 * 1024**3),
             mem_get_info=lambda: (int(state.free_gib * 1024**3), 24 * 1024**3),
+            memory_allocated=lambda: int(state.torch_alloc_gib * 1024**3),
+            max_memory_allocated=lambda: int(state.torch_peak_gib * 1024**3),
             empty_cache=lambda: None,
         ),
         set_float32_matmul_precision=lambda value: None,
@@ -172,6 +175,34 @@ def test_low_free_vram_builds_primary_only(make_real_engine):
     assert len(state.builds) == 1
     wav, meta = module.synthesize(req(gen_seconds=0.5))
     assert meta["model_variant"] == "flash" and len(state.builds) == 1
+
+
+def test_vram_probe_reports_build_and_generation(make_real_engine, capsys):
+    """The deploy probe that makes an OOM attributable: the measured footprint
+    after the variant build, and free VRAM bracketing the generation. The
+    per-model cost is an estimate and the placement threshold is a policy, so
+    without these numbers an OOM cannot be told from a genuine overrun."""
+    module, state = make_real_engine(free_gib=11.5)
+    capsys.readouterr()  # drop import-time bootstrap output
+    module.synthesize(req(gen_seconds=0.5))
+    out = capsys.readouterr().out
+    assert "vram before generate task=instruct_tts variant=flash" in out
+    assert "vram after generate task=instruct_tts variant=flash" in out
+    assert "free=11.5 of 24.0 GiB" in out
+    assert "torch_alloc=12.1 peak=13.4 GiB" in out
+
+
+def test_vram_probe_never_breaks_inference(make_real_engine, capsys, monkeypatch):
+    """Telemetry is best-effort: a failing CUDA query must not fail the job."""
+    module, state = make_real_engine(free_gib=11.5)
+
+    def boom():
+        raise RuntimeError("CUDA driver lost")
+
+    monkeypatch.setattr(module.torch.cuda, "mem_get_info", boom)
+    wav, meta = module.synthesize(req(gen_seconds=0.5))  # must still succeed
+    assert meta["model_variant"] == "flash"
+    assert "vram before generate" not in capsys.readouterr().out
 
 
 def test_second_variant_loads_lazily_on_request(make_real_engine):

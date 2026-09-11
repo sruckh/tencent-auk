@@ -321,6 +321,25 @@ else:
         except Exception:  # never block startup on telemetry
             return 0.0
 
+    def _vram(tag: str) -> None:
+        """Deploy probe: actual VRAM at a point in the job, never estimated.
+
+        The ~12 GiB per-AukInfer figure is an estimate and the placement
+        threshold is explicitly a policy, not measured capacity (stage 01), so
+        an OOM cannot be attributed from the code alone. This is what makes the
+        footprint checkable: free/total at the moment of interest, plus torch's
+        own allocated/peak. Never raises — telemetry must not break inference."""
+        try:
+            free, total = torch.cuda.mem_get_info()
+            print(
+                f"[auk-engine] vram {tag}: free={free / 2**30:.1f} of {total / 2**30:.1f} GiB"
+                f" | torch_alloc={torch.cuda.memory_allocated() / 2**30:.1f}"
+                f" peak={torch.cuda.max_memory_allocated() / 2**30:.1f} GiB",
+                flush=True,
+            )
+        except Exception:  # noqa: BLE001 — telemetry is best-effort
+            pass
+
     # Measured placement (2026-09-11 deploy evidence): each AukInfer owns its
     # full encoder+VAE+DiT (~12 GiB bf16), so dual residency needs ~25 GiB
     # free. Build the default first, then the second only if it truly fits;
@@ -328,6 +347,7 @@ else:
     primary = _default_variant()
     secondary = "base" if primary == "flash" else "flash"
     _ENGINES[primary] = _build_engine(primary)
+    _vram(f"after '{primary}' build")
     if _DEVICE == "cuda" and _free_gib() >= SECOND_VARIANT_MIN_FREE_GIB:
         try:
             _ENGINES[secondary] = _build_engine(secondary)
@@ -368,13 +388,19 @@ else:
             if seconds is None and tmp_path is None:
                 seconds = 7.0
             handle = _get_engine(req.model_variant)
-            waveform, sample_rate = handle.generate(
-                messages,
-                gen_seconds=seconds,
-                nfe=4 if req.model_variant == "flash" else req.nfe,
-                cfg_strength=0.0 if req.model_variant == "flash" else req.cfg_scale,
-                seed=req.seed,
-            )
+            # Bracket the generation: the "before" line shows what the resident
+            # model actually costs, the "after" line its peak during the job.
+            _vram(f"before generate task={req.task} variant={req.model_variant}")
+            try:
+                waveform, sample_rate = handle.generate(
+                    messages,
+                    gen_seconds=seconds,
+                    nfe=4 if req.model_variant == "flash" else req.nfe,
+                    cfg_strength=0.0 if req.model_variant == "flash" else req.cfg_scale,
+                    seed=req.seed,
+                )
+            finally:
+                _vram(f"after generate task={req.task} variant={req.model_variant}")
             if not isinstance(sample_rate, int) or isinstance(sample_rate, bool) or sample_rate <= 0:
                 raise ValueError("Invalid upstream sample rate")
             if waveform.ndim not in (1, 2) or (waveform.ndim == 2 and waveform.shape[0] != 1):

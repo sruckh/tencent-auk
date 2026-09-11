@@ -90,6 +90,9 @@ def test_dockerfile_env_and_volume():
         "RUNPOD_INIT_TIMEOUT=1200",
         "AUDIO_DELIVERY=auto",
         "S3_ADDRESSING_STYLE=path",
+        # Fragmentation remedy for the 24 GB-class OOM; the 2.8 spelling, which
+        # a later rename would silently invalidate (see auk-architecture.md).
+        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True",
     ):
         assert pinned in text
     assert "VOLUME /runpod-volume" in text
