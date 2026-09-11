@@ -140,10 +140,16 @@ def _s3_client_config(cfg: StorageConfig) -> dict[str, object]:
 
 def default_client_factory(cfg: StorageConfig):
     """Production client. ``boto3``/``botocore`` are imported lazily so CI can
-    import this module and exercise every non-S3 path without them."""
+    import this module and exercise every non-S3 path without them.
+
+    The pinned mapping must reach boto3 as a ``botocore.config.Config``, not a
+    plain dict: ``boto3.client`` does attribute access on it
+    (``config.signature_version``), so a dict raises ``AttributeError`` — which
+    surfaces only at delivery time, as ``delivery_failed``."""
     if not cfg.s3_configured() or cfg.access_key_id is None or cfg.secret_access_key is None:
         raise DeliveryError("s3_credentials_missing", "storage credentials are not configured")
     import boto3  # deferred: delivery-time dependency
+    from botocore.config import Config  # deferred, same reason
 
     return boto3.client(
         "s3",
@@ -151,7 +157,7 @@ def default_client_factory(cfg: StorageConfig):
         aws_access_key_id=cfg.access_key_id.reveal(),        # point of use
         aws_secret_access_key=cfg.secret_access_key.reveal(),  # point of use
         region_name=cfg.region,
-        config=_s3_client_config(cfg),
+        config=Config(**_s3_client_config(cfg)),
     )
 
 

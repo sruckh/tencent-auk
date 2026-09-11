@@ -3,6 +3,8 @@
 
 import base64
 import datetime as dt
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -227,6 +229,52 @@ def test_deliver_s3_b2_config_pins():
     assert pins["request_checksum_calculation"] == "when_required"
     assert pins["response_checksum_validation"] == "when_required"
     assert pins["s3"] == {"addressing_style": "path"}
+
+
+def test_default_client_factory_passes_a_botocore_config(monkeypatch):
+    """The mapping must reach boto3 as a ``botocore.config.Config``, not a dict.
+
+    ``boto3.client`` does attribute access on it (``config.signature_version``),
+    so a bare dict raises ``AttributeError`` at delivery time and surfaces to the
+    client as ``delivery_failed``. This covers the wiring that
+    ``test_deliver_s3_b2_config_pins`` — which only inspects the mapping — misses.
+
+    The helper is stubbed to a minimal mapping on purpose: this test is about the
+    wrapping, and the installed botocore may predate individual pinned keys
+    (``request_checksum_calculation`` needs the ``>=1.36`` floor that
+    requirements.txt enforces for production). The real mapping's contents are
+    asserted by the test above.
+    """
+    pytest.importorskip("boto3")
+    from botocore.config import Config
+
+    monkeypatch.setattr(
+        storage, "_s3_client_config",
+        lambda _cfg: {"signature_version": "s3v4", "s3": {"addressing_style": "path"}},
+    )
+    captured = {}
+
+    def fake_client(service, **kwargs):
+        captured.update(kwargs)
+        return "client"
+
+    monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(client=fake_client))
+    assert storage.default_client_factory(cfg()) == "client"
+
+    passed = captured["config"]
+    assert isinstance(passed, Config)  # a dict here is what broke B2 delivery
+    assert passed.signature_version == "s3v4"
+    assert passed.s3 == {"addressing_style": "path"}
+    # Credentials travel revealed at the point of use, never as a Secret object.
+    assert captured["aws_access_key_id"] == "AKIA-LIVE-KEY"
+    assert captured["aws_secret_access_key"] == "super-secret-aws-key"
+    assert captured["endpoint_url"] == "https://s3.us-west-004.backblazeb2.com"
+
+
+def test_default_client_factory_refuses_without_credentials():
+    with pytest.raises(DeliveryError) as excinfo:
+        storage.default_client_factory(storage.StorageConfig.from_env({}))
+    assert excinfo.value.code == "s3_credentials_missing"
 
 
 def test_deliver_s3_presign_expiry_override():
