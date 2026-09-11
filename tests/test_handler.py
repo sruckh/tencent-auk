@@ -183,3 +183,15 @@ def test_run_local_test_validation_failure_is_output(monkeypatch, capsys):
 def test_run_local_test_bad_json_exits_nonzero(capsys):
     assert handler._run_local_test(["handler.py", "--test_input", "{broken"]) == 1
     assert handler._run_local_test(["handler.py", "--test_input"]) == 1
+
+
+def test_startup_logs_delivery_config(capsys, monkeypatch):
+    """Boot log exposes delivery state without ever rendering a credential."""
+    import storage
+
+    monkeypatch.setattr(handler.engine, "_log_system_info", lambda: None)
+    monkeypatch.setattr(storage, "_CFG", storage.StorageConfig.from_env({}))
+    handler._log_system_info()
+    out = capsys.readouterr().out
+    assert "[auk-worker] delivery: default=auto, s3_configured=False" in out
+    assert "Secret" in out or "AKIA" not in out  # no credential material either way

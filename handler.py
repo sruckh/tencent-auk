@@ -27,8 +27,18 @@ import storage  # noqa: E402
 
 def _log_system_info() -> None:  # noqa: F810 — explicit startup hook
     """Startup health verification — engine runs it during bootstrap; kept as
-    an explicit hook so operators can re-invoke it."""
+    an explicit hook so operators can re-invoke it. The delivery line doubles
+    as a deploy probe: it only exists in images built from the delivery-fix
+    commit onward, and `s3_configured` proves whether endpoint credentials
+    actually reached the worker environment (never their values)."""
     engine._log_system_info()
+    cfg = storage._CFG
+    print(
+        f"[auk-worker] delivery: default={cfg.delivery_default}, "
+        f"s3_configured={cfg.s3_configured()}, bucket={cfg.bucket or '-'}, "
+        f"endpoint={'set' if cfg.endpoint_url else 'unset'}",
+        flush=True,
+    )
 
 
 def _crash_dump(job_id: str, exc: BaseException) -> None:
