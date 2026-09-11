@@ -24,7 +24,7 @@ from typing import Any
 
 SAMPLE_RATE = 24000            # pinned: 24 kHz, mono, 16-bit PCM WAV
 MOCK_ENV = "AUK_TEST_MOCK_ENGINE"
-SECOND_VARIANT_MIN_FREE_GIB = 13.0  # measured: one AukInfer ≈ 12 GiB (owns encoder+VAE+DiT)
+SECOND_VARIANT_MIN_FREE_GIB = 25.0  # measured: 21.4 GiB/AukInfer + 2.9 GiB per job
 CKPT_ENV = "CKPT_ROOT"
 DEFAULT_HUB_CACHE = "/runpod-volume/huggingface-cache/hub"
 DEFAULT_CKPT_ROOT = "/runpod-volume/ckpts"
@@ -324,11 +324,13 @@ else:
     def _vram(tag: str) -> None:
         """Deploy probe: actual VRAM at a point in the job, never estimated.
 
-        The ~12 GiB per-AukInfer figure is an estimate and the placement
-        threshold is explicitly a policy, not measured capacity (stage 01), so
-        an OOM cannot be attributed from the code alone. This is what makes the
-        footprint checkable: free/total at the moment of interest, plus torch's
-        own allocated/peak. Never raises — telemetry must not break inference."""
+        The per-model cost was an estimate and the placement threshold a policy
+        (stage 01), so an OOM was previously unattributable from the code alone
+        — it took this probe to establish the real figures (2026-09-11). Reports
+        free/total at the moment of interest plus torch's allocated/peak; note
+        torch_alloc covers only the caching allocator, so `free` is the number
+        that answers "will this fit?". Never raises — telemetry must not break
+        inference."""
         try:
             free, total = torch.cuda.mem_get_info()
             print(
@@ -340,10 +342,17 @@ else:
         except Exception:  # noqa: BLE001 — telemetry is best-effort
             pass
 
-    # Measured placement (2026-09-11 deploy evidence): each AukInfer owns its
-    # full encoder+VAE+DiT (~12 GiB bf16), so dual residency needs ~25 GiB
-    # free. Build the default first, then the second only if it truly fits;
-    # an OOM mid-build degrades to single-variant instead of crashing.
+    # Measured placement (2026-09-11, _vram probe on a 96 GiB card, both
+    # variants resident): torch_alloc=42.7 GiB at baseline => ~21.4 GiB per
+    # AukInfer for its full encoder+VAE+DiT, plus a ~2.9 GiB per-job working
+    # set. Build the default first, then the second only if it truly fits; an
+    # OOM mid-build degrades to single-variant instead of crashing.
+    #
+    # The gate reads mem_get_info, which reports the driver's view of free
+    # memory. That is the honest way to ask "will another model fit?", but it
+    # over-reports against torch's caching allocator (freed segments may still
+    # be reserved). The OOM fallback below is therefore load-bearing, not
+    # decorative.
     primary = _default_variant()
     secondary = "base" if primary == "flash" else "flash"
     _ENGINES[primary] = _build_engine(primary)

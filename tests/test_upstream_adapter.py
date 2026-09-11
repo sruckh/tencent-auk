@@ -57,7 +57,7 @@ def make_real_engine(tmp_path, monkeypatch):
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
     monkeypatch.setenv("DEFAULT_MODEL_VARIANT", "flash")
     state = SimpleNamespace(builds=[], calls=[], sample_rate=48000, fail=False, tensor=Tensor(),
-                            free_gib=24.0, fail_second_build_with=None,
+                            free_gib=40.0, fail_second_build_with=None,
                             torch_alloc_gib=12.1, torch_peak_gib=13.4)
 
     class OutOfMemoryError(RuntimeError):
@@ -67,8 +67,8 @@ def make_real_engine(tmp_path, monkeypatch):
         OutOfMemoryError=OutOfMemoryError,
         cuda=SimpleNamespace(
             is_available=lambda: True,
-            get_device_properties=lambda _: SimpleNamespace(name="fake GPU", total_memory=24 * 1024**3),
-            mem_get_info=lambda: (int(state.free_gib * 1024**3), 24 * 1024**3),
+            get_device_properties=lambda _: SimpleNamespace(name="fake GPU", total_memory=96 * 1024**3),
+            mem_get_info=lambda: (int(state.free_gib * 1024**3), 96 * 1024**3),
             memory_allocated=lambda: int(state.torch_alloc_gib * 1024**3),
             max_memory_allocated=lambda: int(state.torch_peak_gib * 1024**3),
             empty_cache=lambda: None,
@@ -114,7 +114,7 @@ def make_real_engine(tmp_path, monkeypatch):
 
     monkeypatch.setitem(sys.modules, "soundfile", SimpleNamespace(write=write))
 
-    def _make(*, free_gib=24.0, fail_second_build=False):
+    def _make(*, free_gib=40.0, fail_second_build=False):
         if fail_second_build:
             state.fail_second_build_with = OutOfMemoryError("CUDA out of memory")
         state.free_gib = free_gib
@@ -170,7 +170,10 @@ def test_constructor_resolves_each_variant_and_encoder(make_real_engine):
 
 
 def test_low_free_vram_builds_primary_only(make_real_engine):
-    """24 GB-class cards fit one AukInfer (~12 GiB); the second stays lazy."""
+    """A card too small for two AukInfer stacks keeps the second lazy.
+
+    Measured per-model cost is ~21.4 GiB, so 5 GiB free after the primary build
+    means no room for a second (~24 GB-class behaviour)."""
     module, state = make_real_engine(free_gib=5.0)
     assert len(state.builds) == 1
     wav, meta = module.synthesize(req(gen_seconds=0.5))
@@ -188,7 +191,7 @@ def test_vram_probe_reports_build_and_generation(make_real_engine, capsys):
     out = capsys.readouterr().out
     assert "vram before generate task=instruct_tts variant=flash" in out
     assert "vram after generate task=instruct_tts variant=flash" in out
-    assert "free=11.5 of 24.0 GiB" in out
+    assert "free=11.5 of 96.0 GiB" in out
     assert "torch_alloc=12.1 peak=13.4 GiB" in out
 
 
