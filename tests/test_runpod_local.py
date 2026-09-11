@@ -40,7 +40,10 @@ def test_runpod_local_validation_failure():
     proc = _run(json.dumps({"input": {}}))
     assert proc.returncode == 0  # job failure is output, not a crash
     result = _last_json(proc.stdout)
-    assert result["error"]["code"] == "missing_required_field"
+    assert "missing_required_field" in result["error"]
+    # Wire form: the harness emits what the job-done gateway receives, so a
+    # failure it prints cannot be the one that 400s in production.
+    assert json.loads(result["error"])["code"] == "missing_required_field"
 
 
 def test_runpod_local_zero_shot_golden():

@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import sys
 import traceback
+from typing import cast
 
 try:
     import runpod  # pyright: ignore[reportMissingImports]  # platform SDK — production image installs it (stage 05)
@@ -88,9 +89,14 @@ def handler(job: dict[str, object]) -> dict[str, object]:
 def _log_result_shape(job_id: str, result: dict[str, object]) -> None:
     """Deploy probe: prove the exact payload the SDK will serialize. Logs
     field names/types and JSON byte size — never audio data, URLs, or the
-    presign signature. Catches the two silent killers of job-done delivery:
-    non-serializable values and NaN/Infinity (json.dumps emits bare ``NaN``,
-    which strict gateways reject with 400)."""
+    presign signature. Catches the three silent killers of job-done delivery:
+    non-serializable values, NaN/Infinity (json.dumps emits bare ``NaN``, which
+    strict gateways reject with 400), and a non-string ``error`` value.
+
+    Error code and message ride along because they are scrubbed by
+    construction — engine and storage interpolate only ``type(exc).__name__``,
+    never the exception's own text — so no credential or audio path can reach
+    this line."""
     try:
         rendered = json.dumps(result, ensure_ascii=False)
     except (TypeError, ValueError) as exc:
@@ -100,20 +106,54 @@ def _log_result_shape(job_id: str, result: dict[str, object]) -> None:
             flush=True,
         )
         return
-    flags = []
+    flags: list[str] = []
     if "NaN" in rendered or "Infinity" in rendered:
         flags.append("CONTAINS-NAN/INFINITY")
+    if isinstance(result.get("error"), dict):
+        flags.append("ERROR-NOT-STRING-400")
+    detail = ""
+    error = result.get("error")
+    if isinstance(error, str):
+        try:
+            loaded = json.loads(error)
+        except ValueError:
+            loaded = None
+        if isinstance(loaded, dict):
+            fields = cast("dict[str, object]", loaded)
+            detail = f" error_code={fields.get('code')} error_message={fields.get('message')!r}"
+        else:
+            detail = f" error={error!r}"
     print(
         f"[auk-worker] result job_id={job_id} json_bytes={len(rendered)} "
         f"fields={{ {', '.join(f'{k}: {type(v).__name__}' for k, v in sorted(result.items()))} }}"
+        f"{detail}"
         f"{' | ' + ' '.join(flags) if flags else ''}",
         flush=True,
     )
 
 
+def _wire_error(result: dict[str, object]) -> dict[str, object]:
+    """Convert a structured error envelope to the string form the job-done
+    gateway accepts — the only adaptation the wire needs.
+
+    runpod-python's ``run_job`` pops any top-level ``error`` off the handler's
+    return value and re-posts it verbatim as the job's own ``error`` field. The
+    gateway requires a string there: a dict is refused with 400 and the whole
+    payload is discarded, so the job lands COMPLETED carrying no output and the
+    client never learns what failed. Every error the SDK raises itself is
+    already a string (``{"error": json.dumps(info)}``); this aligns ours with
+    it. The structured dict survives verbatim inside the JSON string, so
+    clients recover code/message/field with ``json.loads``."""
+    error = result.get("error")
+    if not isinstance(error, dict):
+        return result
+    return {**result, "error": json.dumps(error, ensure_ascii=False)}
+
+
 def _safe_handler(job: dict[str, object]) -> dict[str, object]:
     """Daemon-safe wrapper: an unexpected exception produces a crash dump and a
-    structured error — the process never dies from a job (PRD NFR 2)."""
+    structured error — the process never dies from a job (PRD NFR 2). Returns
+    the in-process envelope; ``_runpod_handler`` adapts it for the wire."""
     job_id = str((job or {}).get("id") or "local")
     result: dict[str, object]
     try:
@@ -126,6 +166,19 @@ def _safe_handler(job: dict[str, object]) -> dict[str, object]:
                 "message": "unhandled worker exception (see crash dump)",
             }
         }
+    return result
+
+
+def _runpod_handler(job: dict[str, object]) -> dict[str, object]:
+    """The wire path — what RunPod registers, and what the local harness drives.
+
+    ``_safe_handler`` owns isolation and keeps returning the structured
+    envelope that the domain tests consume; this wrapper adapts it for the
+    gateway and logs the exact bytes the SDK will serialize. Both the real
+    worker and ``--test_input`` go through here, so the harness cannot report a
+    payload the gateway would reject."""
+    job_id = str((job or {}).get("id") or "local")
+    result = _wire_error(_safe_handler(job))
     _log_result_shape(job_id, result)
     return result
 
@@ -136,7 +189,12 @@ def _safe_handler(job: dict[str, object]) -> dict[str, object]:
 
 def _run_local_test(argv: list[str]) -> int:
     """``python3 handler.py --test_input '<json>'`` — run one job, print the
-    JSON result, exit 0 (job-level failures are output, not process crashes)."""
+    JSON result, exit 0 (job-level failures are output, not process crashes).
+
+    Drives ``_runpod_handler``, not ``_safe_handler``, so the harness exercises
+    the exact path production does — including the wire error serialization and
+    the result-shape probe. A payload that cannot survive the job-done gateway
+    is therefore visible locally instead of only in a deploy."""
     idx = argv.index("--test_input")
     raw = argv[idx + 1] if len(argv) > idx + 1 else None
     if raw is None:
@@ -147,7 +205,7 @@ def _run_local_test(argv: list[str]) -> int:
     except json.JSONDecodeError as exc:
         print(f"--test_input argument is not valid JSON: {exc}", file=sys.stderr)
         return 1
-    result = _safe_handler({"id": "local-test", "input": payload})
+    result = _runpod_handler({"id": "local-test", "input": payload})
     print(json.dumps(result))
     return 0
 
@@ -159,4 +217,4 @@ if __name__ == "__main__":
         print("runpod SDK is not installed; production images pin it (stage 05). "
               "For local runs use: python3 handler.py --test_input '<json>'", file=sys.stderr)
         sys.exit(1)
-    runpod.serverless.start({"handler": _safe_handler})
+    runpod.serverless.start({"handler": _runpod_handler})

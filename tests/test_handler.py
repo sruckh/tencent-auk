@@ -121,6 +121,56 @@ def test_handler_s3_credentials_missing(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Wire boundary — the job-done gateway rejects a dict-valued `error`
+# ---------------------------------------------------------------------------
+
+def test_wire_error_stringifies_structured_envelope():
+    """The gateway 400s a dict `error`; only the wire form may carry one."""
+    envelope: dict[str, object] = {"error": {"code": "inference_failed", "message": "up", "field": "audio"}}
+    wire = handler._wire_error(envelope)
+    assert isinstance(wire["error"], str)
+    assert json.loads(wire["error"]) == envelope["error"]  # code/message/field survive
+
+
+def test_wire_error_passes_through_success():
+    """A success payload has no `error` key and must be returned untouched."""
+    success: dict[str, object] = {"delivery": "base64", "audio_base64": "UklGRg==", "size_bytes": 8}
+    assert handler._wire_error(success) == success
+
+
+def test_runpod_handler_validation_failure_is_string_error(monkeypatch, capsys):
+    """End of the original bug: an invalid payload reached the client as
+    COMPLETED-with-no-output because the SDK hoisted a dict into `error` and the
+    gateway refused it. The registered handler must emit a string."""
+    result = handler._runpod_handler({"id": "j1", "input": {}})
+    assert isinstance(result["error"], str)
+    assert json.loads(str(result["error"]))["code"] == "missing_required_field"
+    assert "output" not in result
+
+
+def test_runpod_handler_engine_failure_is_string_error(monkeypatch, capsys):
+    _stub_engine(monkeypatch, exc=engine.EngineError("inference_failed", "upstream blew up"))
+    result = handler._runpod_handler({"id": "j1", "input": {"instruction": "x"}})
+    assert json.loads(str(result["error"])) == {"code": "inference_failed", "message": "upstream blew up"}
+
+
+def test_runpod_handler_success_is_untouched(monkeypatch, capsys):
+    _stub_engine(monkeypatch)
+    _stub_storage(monkeypatch)
+    result = handler._runpod_handler({"id": "j1", "input": {"instruction": "hi"}})
+    assert "error" not in result
+    assert result["delivery"] == "base64"
+
+
+def test_safe_handler_still_returns_structured_envelope(monkeypatch):
+    """The in-process contract is unchanged — _wire_error is the only adapter,
+    so the domain tests and the local harness keep the dict envelope."""
+    _stub_engine(monkeypatch, exc=engine.EngineError("inference_failed", "upstream blew up"))
+    result = handler._safe_handler({"id": "j1", "input": {"instruction": "x"}})
+    assert result == {"error": {"code": "inference_failed", "message": "upstream blew up"}}
+
+
+# ---------------------------------------------------------------------------
 # Daemon isolation + crash-dump scrubbing
 # ---------------------------------------------------------------------------
 
@@ -177,7 +227,21 @@ def test_run_local_test_validation_failure_is_output(monkeypatch, capsys):
     code = handler._run_local_test(["handler.py", "--test_input", json.dumps({"input": {}})])
     assert code == 0  # job failure is output, not process crash
     result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-    assert result["error"]["code"] == "missing_required_field"
+    # The harness drives the wire path, so the failure arrives in wire form —
+    # exactly what the job-done gateway receives.
+    assert isinstance(result["error"], str)
+    assert json.loads(result["error"])["code"] == "missing_required_field"
+
+
+def test_run_local_test_emits_wire_payload_it_can_never_be_400d(monkeypatch, capsys):
+    """The regression guard for the job-done 400: whatever the harness prints
+    must be acceptable to the gateway — no dict-valued `error`, and a
+    JSON-serializable payload."""
+    handler._run_local_test(["handler.py", "--test_input", json.dumps({"input": {}})])
+    result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert not isinstance(result.get("error"), dict)
+    assert json.dumps(result)  # round-trips cleanly
+    assert "output" not in result  # SDK drops an empty output; ours carries none
 
 
 def test_run_local_test_bad_json_exits_nonzero(capsys):
@@ -197,12 +261,33 @@ def test_startup_logs_delivery_config(capsys, monkeypatch):
     assert "Secret" in out or "AKIA" not in out  # no credential material either way
 
 
-def test_safe_handler_logs_result_shape(capsys):
+def test_runpod_handler_logs_result_shape(capsys):
     """Every job logs its result payload's size/shape — the deploy probe for
     job-done 400 diagnosis; values (audio, URLs) are never rendered."""
-    result = handler._safe_handler({"id": "probe-job", "input": {"instruction": "hi"}})
+    result = handler._runpod_handler({"id": "probe-job", "input": {"instruction": "hi"}})
     out = capsys.readouterr().out
     assert f"[auk-worker] result job_id=probe-job json_bytes={len}" not in out  # guard against accidental value leak
     assert "[auk-worker] result job_id=probe-job json_bytes=" in out
-    assert "delivery: str" in out or "error: dict" in out  # mock path: no creds → base64, or error shape
+    assert "delivery: str" in out or "error: str" in out  # mock path: no creds → base64, or error shape
     assert result is not None
+
+
+def test_probe_names_the_error_code(capsys, monkeypatch):
+    """The probe reports which failure fired, so a deploy surfaces the cause
+    without a second round trip. Scrub-safe: only the code and the already
+    scrubbed message are printed."""
+    _stub_engine(monkeypatch, exc=engine.EngineError("inference_failed", "synthesis failed: InterruptedError"))
+    handler._runpod_handler({"id": "probe-err", "input": {"instruction": "x"}})
+    out = capsys.readouterr().out
+    assert "error_code=inference_failed" in out
+    assert "synthesis failed: InterruptedError" in out
+
+
+def test_probe_flags_a_dict_error(capsys, monkeypatch):
+    """A dict `error` is the exact shape the gateway 400s — the probe must
+    call it out if a future change ever lets one reach the wire."""
+    monkeypatch.setattr(handler, "_wire_error", lambda result: result)
+    _stub_engine(monkeypatch, exc=engine.EngineError("inference_failed", "up"))
+    handler._runpod_handler({"id": "probe-dict", "input": {"instruction": "x"}})
+    out = capsys.readouterr().out
+    assert "ERROR-NOT-STRING-400" in out
