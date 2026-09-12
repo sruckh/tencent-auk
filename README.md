@@ -245,6 +245,11 @@ might replay it long after the request — or ask for `response_delivery: "base6
 workers answer in ~1.5–2.5 s. Either keep a worker warm (`workers_min: 1`) or show honest progress rather than a
 spinner that looks hung. Sending `"response_delivery": "s3"` is worthwhile for any clip beyond a few seconds.
 
+**Check which variants your pool can serve before exposing a choice.** A 24 GB pool keeps only the default
+variant; asking for the other one builds a model that does not fit and returns `inference_failed`. Read
+`loaded=[…]` from the worker's startup log once per pool, and either omit `model_variant` or offer only the
+resident one. Omitting it is always safe — the worker falls back to `DEFAULT_MODEL_VARIANT`.
+
 ## Environmental variables
 
 Values shown are the baked-in image defaults (`Dockerfile`); override per deployment via RunPod endpoint
@@ -314,11 +319,17 @@ WAV in memory → delivery. Temp files are removed in `finally`; the handler nev
 range `1..8`; metadata reports the effective `nfe=4`. AuK-Base honors `nfe` 16..64 (default 32) and `cfg_scale`
 1.0..5.0 (default 2.0).
 
-**GPU sizing matters more than the variant count.** Measured on an RTX PRO 6000 with both variants resident:
+**GPU sizing matters more than the variant count.** Measured on an RTX PRO 6000 with both variants resident, and
+confirmed on a 23.5 GiB RTX 4090 with one:
 
 ```
-[auk-engine] vram before generate task=instruct_tts variant=flash: free=59.1 of 95.0 GiB | torch_alloc=27.6 peak=27.6 GiB
-[auk-engine] vram after  generate task=instruct_tts variant=flash: free=59.0 of 95.0 GiB | torch_alloc=28.1 peak=30.5 GiB
+# RTX PRO 6000, both variants
+vram before generate … free=59.1 of 95.0 GiB | torch_alloc=27.6 peak=27.6 GiB
+vram after  generate … free=59.0 of 95.0 GiB | torch_alloc=28.1 peak=30.5 GiB
+
+# RTX 4090, flash only — job succeeded
+vram after 'flash' build: free= 9.2 of 23.5 GiB | torch_alloc=13.8 peak=21.3 GiB
+vram after  generate   : free= 6.3 of 23.5 GiB | torch_alloc=14.2 peak=16.7 GiB
 ```
 
 So each resident variant costs **~13.8 GiB** — every `AukInfer` owns its own encoder + VAE + DiT — plus a
@@ -327,20 +338,27 @@ second joins only if `SECOND_VARIANT_MIN_FREE_GIB` (25) stays free.
 
 | Card | One variant + job (~16.7 GiB) | Both variants + job (~30.5 GiB) |
 |------|:---:|:---:|
-| 24 GB class (RTX 4090, 23.5 GiB) | yes | no |
+| 24 GB class (RTX 4090, 23.5 GiB) | **yes — 6.3 GiB spare, verified** | no |
 | 48 GB class (A40 / L40S) | yes | yes |
 | 80 GB class (A100) | yes | yes |
 | 96 GB (RTX PRO 6000) | yes | yes |
 
-A request for a variant that is not resident builds it on demand and fails with a structured `inference_failed`
-if it does not fit.
+**On a single-variant pool, only the resident variant is usable.** A 24 GB card keeps `flash` and skips `base`;
+a request with `"model_variant": "base"` then tries to build that model on demand, does not fit, and fails with
+a structured `inference_failed`. Don't offer a variant picker on such a pool — omit `model_variant` (it defaults
+to `DEFAULT_MODEL_VARIANT`) or pin it to the resident one. The startup log line names what is loaded:
+
+```
+[auk-engine] real mode — … default_variant=flash, loaded=['flash']
+```
 
 These figures already include an encoder fix: upstream loads the Qwen text encoder in bf16 and then casts the
 whole model — encoder included — to fp32, so the worker returns the encoder to bf16 at startup (opt out with
-`AUK_ENCODER_BF16=0`). That is what brought the per-variant cost down from ~21.4 GiB. Note the downcast strands
-the old fp32 blocks in torch's caching allocator, so the worker flushes the cache immediately after; **if you
-remove or reorder that flush, expect the freed memory not to reach the driver** — measured at 7.6 GiB stranded
-across two variants.
+`AUK_ENCODER_BF16=0`). That is what brought the per-variant cost down from ~21.4 GiB, and it is why a 24 GB card
+works at all: at 21.4 GiB the model plus a job needed ~24.3 GiB and OOM'd. Note the downcast strands the old
+fp32 blocks in torch's caching allocator, so the worker flushes the cache immediately after; **if you remove or
+reorder that flush, expect the freed memory not to reach the driver** — measured at 8.3 GiB stranded on a run
+without it, against 0.5 GiB with it.
 
 Treat these numbers as a starting point, not a guarantee: read the `[auk-engine] vram` lines from your own
 deploy before sizing a pool.
