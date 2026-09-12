@@ -321,6 +321,15 @@ else:
         if encoder is None:  # unexpected upstream shape — leave it untouched
             return
         encoder.to(torch.bfloat16)
+        # ``.to(bf16)`` allocates new params and leaves the fp32 blocks as garbage
+        # in torch's caching allocator, where the driver still counts them as
+        # used — measured at 7.6 GiB stranded across two variants. Nothing has
+        # run yet, so flushing the cache here is free; the next real allocation
+        # would otherwise have to find that memory the hard way.
+        try:
+            torch.cuda.empty_cache()
+        except Exception:  # noqa: BLE001 — never let housekeeping break bootstrap
+            pass
 
     def _get_engine(variant: str):
         """Variant handle with lazy second-variant load below the VRAM floor."""

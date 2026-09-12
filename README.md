@@ -314,26 +314,36 @@ WAV in memory → delivery. Temp files are removed in `finally`; the handler nev
 range `1..8`; metadata reports the effective `nfe=4`. AuK-Base honors `nfe` 16..64 (default 32) and `cfg_scale`
 1.0..5.0 (default 2.0).
 
-**GPU sizing matters more than the variant count.** Each resident variant costs **~21.4 GiB measured** — every
-`AukInfer` owns its own encoder + VAE + DiT — plus a **2.9 GiB** per-job working set. Placement is decided at
-startup: the default variant loads eagerly and the second joins only if `SECOND_VARIANT_MIN_FREE_GIB` (25) stays
-free. So:
+**GPU sizing matters more than the variant count.** Measured on an RTX PRO 6000 with both variants resident:
 
-| Card | One variant + job (~24.2 GiB) | Both variants |
+```
+[auk-engine] vram before generate task=instruct_tts variant=flash: free=59.1 of 95.0 GiB | torch_alloc=27.6 peak=27.6 GiB
+[auk-engine] vram after  generate task=instruct_tts variant=flash: free=59.0 of 95.0 GiB | torch_alloc=28.1 peak=30.5 GiB
+```
+
+So each resident variant costs **~13.8 GiB** — every `AukInfer` owns its own encoder + VAE + DiT — plus a
+**~2.9 GiB** per-job working set. Placement is decided at startup: the default variant loads eagerly and the
+second joins only if `SECOND_VARIANT_MIN_FREE_GIB` (25) stays free.
+
+| Card | One variant + job (~16.7 GiB) | Both variants + job (~30.5 GiB) |
 |------|:---:|:---:|
-| 24 GB class (RTX 4090, 23.5 GiB) | **no — OOMs** | no |
-| 48 GB class (A40 / L40S) | yes | no |
+| 24 GB class (RTX 4090, 23.5 GiB) | yes | no |
+| 48 GB class (A40 / L40S) | yes | yes |
 | 80 GB class (A100) | yes | yes |
 | 96 GB (RTX PRO 6000) | yes | yes |
 
 A request for a variant that is not resident builds it on demand and fails with a structured `inference_failed`
 if it does not fit.
 
-That 21.4 GiB includes roughly **6 GiB per variant of avoidable fp32 weights**: upstream loads the Qwen text
-encoder in bf16 and then casts the whole model — encoder included — to fp32. The worker returns the encoder to
-bf16 on startup (opt out with `AUK_ENCODER_BF16=0`), which should lower the floor; **the post-change figure has
-not yet been re-measured on hardware.** Deploy with the `[auk-engine] vram` probe line in the logs and read the
-real numbers rather than trusting a table in a README.
+These figures already include an encoder fix: upstream loads the Qwen text encoder in bf16 and then casts the
+whole model — encoder included — to fp32, so the worker returns the encoder to bf16 at startup (opt out with
+`AUK_ENCODER_BF16=0`). That is what brought the per-variant cost down from ~21.4 GiB. Note the downcast strands
+the old fp32 blocks in torch's caching allocator, so the worker flushes the cache immediately after; **if you
+remove or reorder that flush, expect the freed memory not to reach the driver** — measured at 7.6 GiB stranded
+across two variants.
+
+Treat these numbers as a starting point, not a guarantee: read the `[auk-engine] vram` lines from your own
+deploy before sizing a pool.
 
 ## Development
 

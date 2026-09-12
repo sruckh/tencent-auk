@@ -224,6 +224,16 @@ def test_downcast_leaves_the_transformer_and_vae_alone():
              and n.func.attr in {"to", "half", "bfloat16", "float"}]
     assert casts == ["encoder.to"]  # the encoder only — never self.model / self.vae_model
 
+    # The downcast strands the old fp32 blocks in torch's caching allocator
+    # (measured: 15.1 GiB freed logically, only 7.5 GiB returned to the driver),
+    # so the handler must flush the cache. Asserted structurally because the
+    # fake torch's empty_cache is a lambda and cannot fail the way the real one
+    # would if this regressed.
+    flushed = [ast.unparse(n.func) for n in ast.walk(fn)
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+               and n.func.attr == "empty_cache"]
+    assert flushed == ["torch.cuda.empty_cache"]
+
 
 def test_low_free_vram_builds_primary_only(make_real_engine):
     """A card too small for two AukInfer stacks keeps the second lazy.
