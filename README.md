@@ -108,26 +108,142 @@ refuses to guess).
 
 ## Responses
 
-One top-level object; metadata (`task_executed`, `model_variant`, `nfe`, `sample_rate`, `duration_seconds`,
-`size_bytes`) is merged in. `sample_rate` is the rate the model returns per request (the test mock runs 24 kHz).
-
-**Base64** — `delivery="base64"`, `audio_base64`, `size_bytes`. Only safe for short clips: RunPod's result
-gateway rejects result payloads beyond roughly 10 MB with a silent 400 (the job then reports completed with no
-output).
-
-**S3** — `delivery="s3"`, `audio_url`, `bucket`, `key`, `size_bytes`, `url_expires_in`, `url_expires_at`.
-Keys follow `{prefix}{YYYY}/{MM}/{DD}/{sanitized_job_id}-{uuid4}.wav`; presigned GETs default to 24 h.
-`auto` picks this whenever credentials are configured.
-
-**Failure** — structured envelope, no credential material, no audio bytes:
+The worker returns **one flat object**. RunPod wraps it in the job envelope under `output`, so a client always
+reads `job.output.*`:
 
 ```json
-{"error": {"code": "missing_required_field", "message": "…", "field": "instruction"}}
+{
+  "id": "a5a102c6-…-u2",
+  "status": "COMPLETED",
+  "delayTime": 125,
+  "executionTime": 1595,
+  "output": {
+    "delivery": "s3",
+    "audio_url": "https://s3.us-west-004.backblazeb2.com/Tencent-AuK/…?X-Amz-Signature=…",
+    "bucket": "Tencent-AuK",
+    "key": "AuK2026/09/12/a5a102c6-…-b98f49f1-….wav",
+    "size_bytes": 48044,
+    "duration_seconds": 1,
+    "sample_rate": 24000,
+    "model_variant": "flash",
+    "nfe": 4,
+    "task_executed": "instruct_tts",
+    "url_expires_in": 86400,
+    "url_expires_at": "2026-09-13T01:06:05Z"
+  }
+}
 ```
+
+`sample_rate` is the rate the model actually returns per request (24 kHz in production; the test mock agrees).
+
+**Base64** — `delivery="base64"`, plus `audio_base64` and `size_bytes`. Only safe for short clips: RunPod's
+result gateway caps the inline response (a third-party source reports ~10 MB on `/run`, ~20 MB on `/runsync` —
+**unverified against RunPod's own docs**), and exceeding it fails the delivery silently. Prefer S3.
+
+**S3** — `delivery="s3"`, plus `audio_url`, `bucket`, `key`, `size_bytes`, `url_expires_in`, `url_expires_at`.
+`audio_url` is a presigned GET, valid for `url_expires_in` seconds (default 24 h) — download or play it before
+then. Keys follow `{prefix}{YYYY}/{MM}/{DD}/{sanitized_job_id}-{uuid4}.wav`, where the prefix is concatenated
+**verbatim with no separator**: `auk/` yields `auk/2026/…`, but `AuK` yields `AuK2026/…`. `auto` picks this
+whenever credentials are configured.
+
+### Failures — read the error as a JSON *string*
+
+A failed job reports `status: "FAILED"`. **`error` is a JSON string, not an object** — this is a RunPod platform
+requirement, not a worker choice. `runpod-python` hoists any top-level `error` off the handler's return value
+into the job's own error field, and the job-done gateway rejects a non-string there with `400 Bad Request`
+(runpod-python#309). The worker therefore serializes its structured envelope into a string at the wire boundary:
+
+```json
+{
+  "id": "…",
+  "status": "FAILED",
+  "error": "{\"code\": \"missing_required_field\", \"message\": \"instruction is required\", \"field\": \"instruction\"}"
+}
+```
+
+**Parse it:**
+
+```js
+const detail = typeof job.error === "string" ? JSON.parse(job.error) : job.error;
+// detail.code, detail.message, detail.field (field is optional)
+```
+
+Do not write `job.error.code` — it is `undefined`. The structured `code`/`message`/`field` survive verbatim
+inside the string, so nothing is lost; it only needs one `JSON.parse`.
 
 Error codes (closed set): `invalid_payload` · `missing_required_field` · `invalid_base64` · `audio_too_large` ·
 `audio_download_failed` · `unsupported_model_variant` · `inference_failed` · `s3_credentials_missing` ·
 `delivery_failed`.
+
+Messages are safe to display: the engine and storage interpolate only the exception's **type name**, never its
+own text, and credentials travel as masked `Secret` objects. No error ever carries audio bytes, a presigned URL,
+or credential material.
+
+A job can also come back `COMPLETED` with **no `output`** if the result could not be delivered to RunPod at all
+(for example the `/runsync` window expired mid-job — see **Cold starts & `/runsync`**). Treat "completed but no `output`" as a
+failure and retry rather than reading fields off it.
+
+## Calling it from a front end
+
+**The RunPod API key must never reach the browser.** Every request authenticates with
+`Authorization: Bearer <RUNPOD_API_KEY>`, and an endpoint id + key pair can spend your GPU minutes — shipping
+it in client-side code exposes it to anyone who opens devtools. Route browser calls through a small backend you
+control:
+
+```
+browser  ──POST /api/tts──▶  your backend  ──Bearer key──▶  api.runpod.ai/v2/<endpoint-id>
+         ◀──{ audioUrl }──                ◀──job JSON──
+```
+
+The backend additionally lets you hold the API key server-side, rate-limit callers, and swap the endpoint id
+without a front-end redeploy.
+
+**Prefer async `/run` + poll for anything user-facing.** `/runsync` holds the connection open, so a cold start
+(~90 s, see below) blocks it and can time out. `/run` returns an id immediately, which suits a loading state:
+
+```js
+// backend
+const r = await fetch(`https://api.runpod.ai/v2/${ENDPOINT}/run`, {
+  method: "POST",
+  headers: { Authorization: `Bearer ${RUNPOD_API_KEY}`, "Content-Type": "application/json" },
+  body: JSON.stringify({ input: { task: "instruct_tts", instruction, gen_seconds: 2.5 } }),
+});
+const { id } = await r.json();
+
+// poll until terminal — IN_QUEUE | IN_PROGRESS | COMPLETED | FAILED | CANCELLED | TIMED_OUT
+while (true) {
+  const job = await (await fetch(`https://api.runpod.ai/v2/${ENDPOINT}/status/${id}`, {
+    headers: { Authorization: `Bearer ${RUNPOD_API_KEY}` },
+  })).json();
+  if (job.status === "COMPLETED" && job.output) return { ok: true, ...job.output };
+  if (job.status === "COMPLETED") return { ok: false, code: "no_output" };   // delivery lost
+  if (["FAILED", "CANCELLED", "TIMED_OUT"].includes(job.status)) {
+    const detail = typeof job.error === "string" ? JSON.parse(job.error) : job.error;
+    return { ok: false, ...detail };
+  }
+  await new Promise((res) => setTimeout(res, 1000));   // back off in production
+}
+```
+
+**Playing the result.** Both delivery modes produce something an `<audio>` element can use directly:
+
+```js
+// `result` is the flattened success object from the poll above ({ ok: true, ...job.output })
+
+// S3 (the default whenever credentials are configured) — presigned, valid ~24 h
+audioEl.src = result.audio_url;
+
+// base64 fallback — wrap the bytes in a Blob
+const bytes = Uint8Array.from(atob(result.audio_base64), (c) => c.charCodeAt(0));
+audioEl.src = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+```
+
+`audio_url` expires (`url_expires_at` is an ISO-8601 UTC timestamp). Download or cache the audio if the user
+might replay it long after the request — or ask for `response_delivery: "base64"` when the clip is short.
+
+**Design the UI for a cold start.** A freshly booted worker loads models before the first job (~90 s); warm
+workers answer in ~1.5–2.5 s. Either keep a worker warm (`workers_min: 1`) or show honest progress rather than a
+spinner that looks hung. Sending `"response_delivery": "s3"` is worthwhile for any clip beyond a few seconds.
 
 ## Environmental variables
 
@@ -145,6 +261,8 @@ environment variables. The two credential variables are **runtime-only** — nev
 | `TRANSFORMERS_OFFLINE` | `1` | transformers likewise resolves locally only |
 | `AUK_OFFLINE` | `0` | `1` forbids the download fallback entirely (fail fast) |
 | `RUNPOD_INIT_TIMEOUT` | `1200` | platform init budget; downloads bounded to `min(900, this − 300)` s |
+| `AUK_ENCODER_BF16` | `1` | `0` keeps upstream's fp32 encoder weights (see **How it works → Variants**); set only when output must be byte-comparable to the unmodified baseline |
+| `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` | allocator fragmentation headroom. Note the spelling is version-specific — torch 2.8 uses `PYTORCH_CUDA_ALLOC_CONF`; `PYTORCH_ALLOC_CONF` is a later rename and is a silent no-op here |
 
 ### Platform / process
 
@@ -194,15 +312,33 @@ WAV in memory → delivery. Temp files are removed in `finally`; the handler nev
 
 **Variants.** AuK-Flash runs its distilled recipe — exactly 4 steps, CFG 0.0 — regardless of the accepted input
 range `1..8`; metadata reports the effective `nfe=4`. AuK-Base honors `nfe` 16..64 (default 32) and `cfg_scale`
-1.0..5.0 (default 2.0). Each resident variant costs ~12 GiB — every `AukInfer` owns its own encoder + VAE +
-DiT — so placement is measured at startup: the default variant loads eagerly and the second joins only if
-≥13 GiB stay free. On a 24 GB GPU that means **one** variant (requests for the other return a structured
-error); on 48 GB+ cards both stay resident.
+1.0..5.0 (default 2.0).
+
+**GPU sizing matters more than the variant count.** Each resident variant costs **~21.4 GiB measured** — every
+`AukInfer` owns its own encoder + VAE + DiT — plus a **2.9 GiB** per-job working set. Placement is decided at
+startup: the default variant loads eagerly and the second joins only if `SECOND_VARIANT_MIN_FREE_GIB` (25) stays
+free. So:
+
+| Card | One variant + job (~24.2 GiB) | Both variants |
+|------|:---:|:---:|
+| 24 GB class (RTX 4090, 23.5 GiB) | **no — OOMs** | no |
+| 48 GB class (A40 / L40S) | yes | no |
+| 80 GB class (A100) | yes | yes |
+| 96 GB (RTX PRO 6000) | yes | yes |
+
+A request for a variant that is not resident builds it on demand and fails with a structured `inference_failed`
+if it does not fit.
+
+That 21.4 GiB includes roughly **6 GiB per variant of avoidable fp32 weights**: upstream loads the Qwen text
+encoder in bf16 and then casts the whole model — encoder included — to fp32. The worker returns the encoder to
+bf16 on startup (opt out with `AUK_ENCODER_BF16=0`), which should lower the floor; **the post-change figure has
+not yet been re-measured on hardware.** Deploy with the `[auk-engine] vram` probe line in the logs and read the
+real numbers rather than trusting a table in a README.
 
 ## Development
 
 ```bash
-AUK_TEST_MOCK_ENGINE=1 python3 -m pytest -v tests/   # 139 tests, stdlib-only, no GPU/network
+AUK_TEST_MOCK_ENGINE=1 python3 -m pytest -v tests/   # 163 tests, stdlib-only, no GPU/network
 AUK_TEST_MOCK_ENGINE=1 python3 handler.py --test_input '{"input": {"instruction": "hello"}}'
 ```
 
@@ -213,8 +349,10 @@ AUK_TEST_MOCK_ENGINE=1 python3 handler.py --test_input '{"input": {"instruction"
   deviation from upstream's declared `torch>=2.7,<2.8`, so the vendored package installs `--no-deps` with its
   remaining inference deps owned by `requirements.txt`. No flash-attention wheel: inference pins
   `attn_backend="torch"`.
-- **Contracts**: the `.icm/` workspace pins every behavioral contract; `python3 /root/.claude/skills/icm/scripts/audit .icm`
-  validates the workspace.
+- **Where the contracts live**: the behavioral contracts (payload shapes, error codes, placement policy,
+  storage field sets) are pinned in a local Interpretable-Context-Methodology workspace under `.icm/`. That tree
+  is **not committed** — it is development context, not repository or image content — so a fresh clone will not
+  contain it. In a clone, the authoritative sources are the code, `tests/`, and this README.
 
 ## License
 
