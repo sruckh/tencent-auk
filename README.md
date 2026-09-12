@@ -46,11 +46,12 @@ gateway rejects very large inline payloads.
 
 ### Cold starts & `/runsync`
 
-The first job after a worker spawn waits through model loading (~90 s), which exceeds the default `/runsync`
-sync window — the gateway returns `IN_PROGRESS`, and the worker's later delivery to the expired sync record is
-rejected (the job then reports completed with **no output**). For the first job after any cold boot, either
-raise the window with `?wait=300000` (5 min, milliseconds) or use `/run` + `/status/:id` polling; a warm worker
-answers `/runsync` in a couple of seconds with no options needed.
+The first job after a worker spawn waits through model loading (~90 s measured), and RunPod's default `/runsync`
+wait is **also 90 s** — so a cold start lands right on the boundary. When the wait expires the gateway returns
+`IN_PROGRESS`, and the worker's later delivery to that expired sync record is rejected, so the job ends up
+reporting completed with **no output**. For the first job after any cold boot, either raise the window with
+`?wait=300000` (the documented range is 1000–300000 ms) or use `/run` + `/status/:id`; a warm worker answers
+`/runsync` with no options needed.
 
 ## Endpoints
 
@@ -63,9 +64,15 @@ serverless endpoint at `https://api.runpod.ai/v2/<endpoint-id>`:
 | `POST` | `/runsync` | queue and block until the result is ready |
 | `GET` | `/status/:id` | poll a job's status / fetch its result |
 | `POST` | `/cancel/:id` | cancel a queued or running job |
-| `GET` | `/health` | worker liveness + concurrency snapshot |
+| `POST` | `/retry/:id` | requeue a `FAILED` or `TIMED_OUT` job, same id and input |
+| `GET` | `/health` | worker + job counters (see the RunPod operation reference) |
 
 There are no worker-internal HTTP routes — the entire API surface is the `input` dict of the job payload.
+`/stream` and `/purge-queue` also exist but are unused here: the worker is not a streaming handler, and purging
+affects every caller on the endpoint.
+
+Results expire — **1 minute after completion for `/runsync`, 30 minutes for `/run`** — so fetch promptly, or the
+job can no longer be retried.
 
 ## The job contract (`input`)
 
@@ -136,9 +143,10 @@ reads `job.output.*`:
 
 `sample_rate` is the rate the model actually returns per request (24 kHz in production; the test mock agrees).
 
-**Base64** — `delivery="base64"`, plus `audio_base64` and `size_bytes`. Only safe for short clips: RunPod's
-result gateway caps the inline response (a third-party source reports ~10 MB on `/run`, ~20 MB on `/runsync` —
-**unverified against RunPod's own docs**), and exceeding it fails the delivery silently. Prefer S3.
+**Base64** — `delivery="base64"`, plus `audio_base64` and `size_bytes`. Only safe for short clips: RunPod caps
+the response payload at **10 MB on `/run`** and **20 MB on `/runsync`** (RunPod operation reference), and
+exceeding it fails the delivery silently — the job reports `COMPLETED` with no `output`. A 24 kHz mono 16-bit
+WAV is ~48 KB/s, so base64 (~4/3×) reaches 10 MB at roughly 160 s of audio. Prefer S3.
 
 **S3** — `delivery="s3"`, plus `audio_url`, `bucket`, `key`, `size_bytes`, `url_expires_in`, `url_expires_at`.
 `audio_url` is a presigned GET, valid for `url_expires_in` seconds (default 24 h) — download or play it before
@@ -210,16 +218,21 @@ const r = await fetch(`https://api.runpod.ai/v2/${ENDPOINT}/run`, {
 });
 const { id } = await r.json();
 
-// poll until terminal — IN_QUEUE | IN_PROGRESS | COMPLETED | FAILED | CANCELLED | TIMED_OUT
+// Non-terminal: IN_QUEUE | IN_PROGRESS | RUNNING. Terminal: COMPLETED | FAILED | CANCELLED | TIMED_OUT
+// Loop on the non-terminal set rather than assuming the terminal list is exhaustive.
+const PENDING = ["IN_QUEUE", "IN_PROGRESS", "RUNNING"];
 while (true) {
   const job = await (await fetch(`https://api.runpod.ai/v2/${ENDPOINT}/status/${id}`, {
     headers: { Authorization: `Bearer ${RUNPOD_API_KEY}` },
   })).json();
-  if (job.status === "COMPLETED" && job.output) return { ok: true, ...job.output };
-  if (job.status === "COMPLETED") return { ok: false, code: "no_output" };   // delivery lost
-  if (["FAILED", "CANCELLED", "TIMED_OUT"].includes(job.status)) {
+
+  if (job.status === "COMPLETED") {
+    // Terminal, but `output` is absent if delivery to RunPod was lost — do not read fields off it.
+    return job.output ? { ok: true, ...job.output } : { ok: false, code: "no_output" };
+  }
+  if (!PENDING.includes(job.status)) {                       // FAILED | CANCELLED | TIMED_OUT
     const detail = typeof job.error === "string" ? JSON.parse(job.error) : job.error;
-    return { ok: false, ...detail };
+    return { ok: false, code: job.status, ...detail };
   }
   await new Promise((res) => setTimeout(res, 1000));   // back off in production
 }
@@ -241,9 +254,10 @@ audioEl.src = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
 `audio_url` expires (`url_expires_at` is an ISO-8601 UTC timestamp). Download or cache the audio if the user
 might replay it long after the request — or ask for `response_delivery: "base64"` when the clip is short.
 
-**Design the UI for a cold start.** A freshly booted worker loads models before the first job (~90 s); warm
-workers answer in ~1.5–2.5 s. Either keep a worker warm (`workers_min: 1`) or show honest progress rather than a
-spinner that looks hung. Sending `"response_delivery": "s3"` is worthwhile for any clip beyond a few seconds.
+**Design the UI for a cold start.** A freshly booted worker loads models before the first job (~90 s measured,
+against RunPod's 90 s default `/runsync` wait — see **Cold starts**). A warm worker returned a 1-second clip in
+1.6 s execution time. Either keep a worker warm (`workers_min: 1`) or show honest progress rather than a spinner
+that looks hung. Sending `"response_delivery": "s3"` is worthwhile for any clip beyond a few seconds.
 
 **Check which variants your pool can serve before exposing a choice.** A 24 GB pool keeps only the default
 variant; asking for the other one builds a model that does not fit and returns `inference_failed`. Read
@@ -252,8 +266,10 @@ resident one. Omitting it is always safe — the worker falls back to `DEFAULT_M
 
 ## Environmental variables
 
-Values shown are the baked-in image defaults (`Dockerfile`); override per deployment via RunPod endpoint
-environment variables. The two credential variables are **runtime-only** — never baked into the image.
+Values are the defaults the worker runs with. All except `AUK_ENCODER_BF16` and `AUK_TEST_MOCK_ENGINE` are baked
+into the image (`Dockerfile` `ENV`); those two are code defaults in `engine.py`, so setting them means adding a
+variable the image does not define. Override any of them per deployment via RunPod endpoint environment
+variables. The two credential variables are **runtime-only** — never baked into the image.
 
 ### Engine & checkpoints
 
