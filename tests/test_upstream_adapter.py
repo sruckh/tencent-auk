@@ -18,6 +18,21 @@ ROOT = Path(__file__).resolve().parents[1]
 UPSTREAM = ROOT / "src/src/auk/infer/infer_auk.py"
 
 
+class _FakeEncoder:
+    """Stand-in for the frozen Qwen text encoder, tracking its own dtype.
+
+    Upstream upcasts it to fp32 inside CFMEdit.to(torch.float32); these tests
+    assert the worker puts it back to bf16 without touching the transformer."""
+
+    def __init__(self):
+        self.dtype = "float32"
+        self.requests_grad = True
+
+    def to(self, dtype):
+        self.dtype = str(dtype).replace("torch.", "")
+        return self
+
+
 class Samples(list[float]):
     def reshape(self, size):
         assert size == -1
@@ -65,6 +80,10 @@ def make_real_engine(tmp_path, monkeypatch):
 
     torch = SimpleNamespace(
         OutOfMemoryError=OutOfMemoryError,
+        # _downcast_encoder targets torch.bfloat16; the stand-in only needs the
+        # attributes to resolve, since _FakeEncoder.to records a string.
+        bfloat16="bfloat16",
+        float32="float32",
         cuda=SimpleNamespace(
             is_available=lambda: True,
             get_device_properties=lambda _: SimpleNamespace(name="fake GPU", total_memory=96 * 1024**3),
@@ -88,6 +107,8 @@ def make_real_engine(tmp_path, monkeypatch):
             assert device == "cuda" and dtype == "bf16"
             assert engine_env("HF_HUB_OFFLINE") == "1"
             state.builds.append((config_path, ckpt_path, qwen_path))
+            self.model = SimpleNamespace(text_encoder=_FakeEncoder())
+            self.dtype = "bf16" 
 
         def generate(self, messages, *, audio=None, gen_seconds=None, nfe=32, cfg_strength=2.0,
                      sway_sampling_coef=-1.0, t_grid=None, seed=None):
@@ -167,6 +188,41 @@ def test_constructor_resolves_each_variant_and_encoder(make_real_engine):
     assert all(Path(row[2]).name == "Qwen2.5-Omni-3B" for row in state.builds)
     module.synthesize(req(gen_seconds=0.5))
     assert len(state.builds) == 2
+
+
+def test_encoder_downcast_to_bf16_on_build(make_real_engine):
+    """Upstream loads the encoder bf16 then upcasts the whole CFMEdit to fp32,
+    so it lands on the GPU at twice the necessary size, once per variant. The
+    worker puts the frozen encoder back to bf16."""
+    module, state = make_real_engine()
+    handles = module._ENGINES
+    assert len(handles) == 2
+    for handle in handles.values():
+        assert handle.model.text_encoder.dtype == "bfloat16"
+
+
+def test_encoder_downcast_is_opt_out(make_real_engine, monkeypatch, capsys):
+    """AUK_ENCODER_BF16=0 keeps upstream's fp32 weights, for byte-comparable
+    output against the unmodified baseline."""
+    monkeypatch.setenv("AUK_ENCODER_BF16", "0")
+    module, state = make_real_engine()
+    assert module._ENGINES["flash"].model.text_encoder.dtype == "float32"
+    assert "encoder bf16 downcast disabled" in capsys.readouterr().out
+
+
+def test_downcast_leaves_the_transformer_and_vae_alone():
+    """The other half of the contract: CFMEdit.sample derives the ODE state
+    dtype from next(self.parameters()).dtype, and self.transformer is registered
+    before text_encoder — so downcasting the transformer would demote the whole
+    integration trajectory to bf16. Asserted structurally against the worker
+    source, since the real transformer needs a GPU."""
+    tree = ast.parse((ROOT / "engine.py").read_text())
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_downcast_encoder")
+    casts = [ast.unparse(n.func) for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr in {"to", "half", "bfloat16", "float"}]
+    assert casts == ["encoder.to"]  # the encoder only — never self.model / self.vae_model
 
 
 def test_low_free_vram_builds_primary_only(make_real_engine):

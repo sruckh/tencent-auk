@@ -24,6 +24,7 @@ from typing import Any
 
 SAMPLE_RATE = 24000            # pinned: 24 kHz, mono, 16-bit PCM WAV
 MOCK_ENV = "AUK_TEST_MOCK_ENGINE"
+ENCODER_BF16_ENV = "AUK_ENCODER_BF16"
 SECOND_VARIANT_MIN_FREE_GIB = 25.0  # measured: 21.4 GiB/AukInfer + 2.9 GiB per job
 CKPT_ENV = "CKPT_ROOT"
 DEFAULT_HUB_CACHE = "/runpod-volume/huggingface-cache/hub"
@@ -282,10 +283,44 @@ else:
         path = _CHECKPOINTS[variant]
         checkpoint = _COMPONENTS[variant][1]
         assert checkpoint is not None
-        return AukInfer(
+        handle = AukInfer(
             str(path / "config.yaml"), str(path / checkpoint),
             device=_DEVICE, dtype="bf16", qwen_path=str(_CHECKPOINTS["encoder"]),
         )
+        _downcast_encoder(handle)
+        return handle
+
+    def _downcast_encoder(handle) -> None:
+        """Return the frozen Qwen text encoder to bf16, undoing upstream's fp32 upcast.
+
+        Upstream loads the encoder with ``torch_dtype=torch.bfloat16`` and then,
+        a few lines later, calls ``model.to(torch.float32)`` over the whole
+        CFMEdit — which holds the encoder — so it lands on the GPU in fp32 at
+        twice the necessary size, once per variant. The ``dtype="bf16"`` this
+        module passes only selects the autocast dtype used at generation, so it
+        never undoes that.
+
+        Only the encoder is touched, and that is deliberate:
+
+        * ``CFMEdit.sample`` derives the ODE state dtype from
+          ``next(self.parameters()).dtype``. ``self.transformer`` is registered
+          first, so that is the *transformer's* dtype — leaving it fp32 keeps the
+          whole integration trajectory in fp32 rather than demoting it to bf16.
+        * The VAE is left alone too: it decodes outside the autocast block, and
+          ``denormalize`` forces ``.float()`` as the explicit fp32 handoff.
+
+        The encoder itself gains nothing from fp32 storage: it is frozen, runs
+        once per job under ``torch.no_grad()`` inside autocast, so its matmuls
+        are already bf16 — this only stops holding a second fp32 copy of the
+        weights. Disable with ``AUK_ENCODER_BF16=0`` if output must be
+        byte-comparable to the fp32-weight baseline."""
+        if os.environ.get(ENCODER_BF16_ENV, "1") == "0":
+            print(f"[auk-engine] encoder bf16 downcast disabled ({ENCODER_BF16_ENV}=0)", flush=True)
+            return
+        encoder = getattr(getattr(handle, "model", None), "text_encoder", None)
+        if encoder is None:  # unexpected upstream shape — leave it untouched
+            return
+        encoder.to(torch.bfloat16)
 
     def _get_engine(variant: str):
         """Variant handle with lazy second-variant load below the VRAM floor."""
