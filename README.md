@@ -261,9 +261,10 @@ that looks hung. Sending `"response_delivery": "s3"` is worthwhile for any clip 
 
 **Variant switching costs a reload — default to omitting `model_variant`.** The worker keeps exactly one
 model in VRAM; a job for the other variant evicts the resident one and rebuilds it — a cold-start-sized pause
-(~90 s) before that job, and every job until it switches back. Both variants work on any 24 GB+ pool, but
-unless the front-end genuinely needs both, omit `model_variant` and let the worker fall back to
-`DEFAULT_MODEL_VARIANT` so every job hits a warm engine.
+(~90 s) before that job, and every job until it switches back. Also match the pool to the variant: flash
+serves on any 24 GB+ worker, but **base needs a ≥32 GB pool** (see **GPU sizing**). Unless the front-end
+genuinely needs base, omit `model_variant` and let the worker fall back to `DEFAULT_MODEL_VARIANT` (the image
+pins `flash`) so every job hits a warm engine.
 
 ## Environmental variables
 
@@ -334,7 +335,7 @@ WAV in memory → delivery. Temp files are removed in `finally`; the handler nev
 
 **Variants.** AuK-Flash runs its distilled recipe — exactly 4 steps, CFG 0.0 — regardless of the accepted input
 range `1..8`; metadata reports the effective `nfe=4`. AuK-Base honors `nfe` 16..64 (default 32) and `cfg_scale`
-1.0..5.0 (default 2.0).
+1.0..5.0 (default 2.0). Base needs a ≥32 GiB GPU; flash runs on 24 GiB (see **GPU sizing**).
 
 **GPU sizing.** Measured on an RTX PRO 6000 and confirmed on a 23.5 GiB RTX 4090 (flash):
 
@@ -349,18 +350,24 @@ vram after  generate   : free= 6.3 of 23.5 GiB | torch_alloc=14.2 peak=16.7 GiB
 ```
 
 So each resident variant costs **~13.8 GiB** — every `AukInfer` owns its own encoder + VAE + DiT — plus a
-**~2.9 GiB** per-job working set. Placement is therefore **single-resident**: exactly one model lives in VRAM.
-The default variant loads eagerly at startup; a job asking for the other evicts it first (drop the handle,
-`empty_cache()`, rebuild — a full model load from the volume cache). Stacking both needs ~43 GiB (the 96 GiB
-probe above once measured 42.7 GiB with both resident) and OOMs a 32 GiB card, so the worker never stacks them.
+per-job working set (~2.9 GiB for flash). Placement is therefore **single-resident**: exactly one model lives
+in VRAM. The default variant loads eagerly at startup; a job asking for the other evicts it first (drop the
+handle, `empty_cache()`, rebuild — a full model load from the volume cache). Stacking both needs ~43 GiB (the
+96 GiB probe above once measured 42.7 GiB with both resident) and OOMs a 32 GiB card, so the worker never
+stacks them.
 
-| Card | One variant + job (~16.7 GiB) |
-|------|:---:|
-| 24 GB class (RTX 4090, 23.5 GiB) | **yes — 6.3 GiB spare, verified** |
-| 32 GB class (RTX 5090) | yes |
-| 48 GB class (A40 / L40S) | yes |
-| 80 GB class (A100) | yes |
-| 96 GB (RTX PRO 6000) | yes |
+**The two variants have different floors.** Flash (4 steps, CFG off) plus its job fits a 23.5 GiB card with
+6.3 GiB spare — verified. Base runs 32 sampling steps with CFG on and its job working set does **not** fit
+24 GB: treat **32 GiB as the floor for base** (verified on a 31.4 GiB RTX 5090; it fails on a 23.5 GiB
+RTX 4090).
+
+| Card | Flash + job | Base + job |
+|------|:---:|:---:|
+| 24 GB class (RTX 4090, 23.5 GiB) | **yes — 6.3 GiB spare, verified** | no — field-verified |
+| 32 GB class (RTX 5090, 31.4 GiB) | yes | **yes — verified** |
+| 48 GB class (A40 / L40S) | yes | yes |
+| 80 GB class (A100) | yes | yes |
+| 96 GB (RTX PRO 6000) | yes | yes |
 
 **On a single-variant pool, only the resident variant is usable.** A 24 GB card keeps `flash` and skips `base`;
 a request with `"model_variant": "base"` then tries to build that model on demand, does not fit, and fails with
