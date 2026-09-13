@@ -183,9 +183,9 @@ Error codes (closed set): `invalid_payload` · `missing_required_field` · `inva
 `audio_download_failed` · `unsupported_model_variant` · `inference_failed` · `s3_credentials_missing` ·
 `delivery_failed`.
 
-Messages are safe to display: the engine and storage interpolate only the exception's **type name**, never its
-own text, and credentials travel as masked `Secret` objects. No error ever carries audio bytes, a presigned URL,
-or credential material.
+Messages are safe to display: the engine and storage interpolate only the exception's **type name** (plus the
+missing module's name for import errors), never its own text, and credentials travel as masked `Secret`
+objects. No error ever carries audio bytes, a presigned URL, or credential material.
 
 A job can also come back `COMPLETED` with **no `output`** if the result could not be delivered to RunPod at all
 (for example the `/runsync` window expired mid-job — see **Cold starts & `/runsync`**). Treat "completed but no `output`" as a
@@ -259,10 +259,11 @@ against RunPod's 90 s default `/runsync` wait — see **Cold starts**). A warm w
 1.6 s execution time. Either keep a worker warm (`workers_min: 1`) or show honest progress rather than a spinner
 that looks hung. Sending `"response_delivery": "s3"` is worthwhile for any clip beyond a few seconds.
 
-**Check which variants your pool can serve before exposing a choice.** A 24 GB pool keeps only the default
-variant; asking for the other one builds a model that does not fit and returns `inference_failed`. Read
-`loaded=[…]` from the worker's startup log once per pool, and either omit `model_variant` or offer only the
-resident one. Omitting it is always safe — the worker falls back to `DEFAULT_MODEL_VARIANT`.
+**Variant switching costs a reload — default to omitting `model_variant`.** The worker keeps exactly one
+model in VRAM; a job for the other variant evicts the resident one and rebuilds it — a cold-start-sized pause
+(~90 s) before that job, and every job until it switches back. Both variants work on any 24 GB+ pool, but
+unless the front-end genuinely needs both, omit `model_variant` and let the worker fall back to
+`DEFAULT_MODEL_VARIANT` so every job hits a warm engine.
 
 ## Environmental variables
 
@@ -275,7 +276,7 @@ variables. The two credential variables are **runtime-only** — never baked int
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `DEFAULT_MODEL_VARIANT` | `flash` | variant loaded first; the other loads lazily |
+| `DEFAULT_MODEL_VARIANT` | `flash` | variant built at boot; a job for the other variant evicts it and rebuilds — one model in VRAM at a time |
 | `CKPT_ROOT` | `/runpod-volume/ckpts` | designated checkpoint layout, tier 2 of resolution |
 | `HF_HUB_CACHE` | `/runpod-volume/huggingface-cache/hub` | native RunPod model-cache location, tier 1 |
 | `HF_HUB_OFFLINE` | `1` | parent inference process never talks to the Hub |
