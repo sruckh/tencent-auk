@@ -25,7 +25,6 @@ from typing import Any
 SAMPLE_RATE = 24000            # pinned: 24 kHz, mono, 16-bit PCM WAV
 MOCK_ENV = "AUK_TEST_MOCK_ENGINE"
 ENCODER_BF16_ENV = "AUK_ENCODER_BF16"
-SECOND_VARIANT_MIN_FREE_GIB = 25.0  # measured: 21.4 GiB/AukInfer + 2.9 GiB per job
 CKPT_ENV = "CKPT_ROOT"
 DEFAULT_HUB_CACHE = "/runpod-volume/huggingface-cache/hub"
 DEFAULT_CKPT_ROOT = "/runpod-volume/ckpts"
@@ -331,9 +330,31 @@ else:
         except Exception:  # noqa: BLE001 — never let housekeeping break bootstrap
             pass
 
+    def _evict_engine() -> None:
+        """Free the resident variant so the next build starts from empty VRAM.
+
+        CFMEdit owns the Qwen thinker, the VAE and the DiT, so dropping the
+        handle drops the whole stack; empty_cache() returns the freed segments
+        to the driver — the caching allocator would otherwise hold them
+        reserved and the next build would OOM against its own freed memory."""
+        if not _ENGINES:
+            return
+        print(
+            f"[auk-engine] evicting resident {sorted(_ENGINES)} "
+            "before building another variant",
+            flush=True,
+        )
+        _ENGINES.clear()
+        torch.cuda.empty_cache()
+
     def _get_engine(variant: str):
-        """Variant handle with lazy second-variant load below the VRAM floor."""
+        """Single-resident engine handle: never two AukInfers in VRAM.
+
+        Each AukInfer is a full encoder+VAE+DiT stack, so two resident
+        variants OOM every card this worker targets; a job that asks for the
+        other variant evicts the resident one first (swap-on-switch)."""
         if variant not in _ENGINES:
+            _evict_engine()
             _ENGINES[variant] = _build_engine(variant)
         return _ENGINES[variant]
 
@@ -359,12 +380,6 @@ else:
     torch.set_float32_matmul_precision("high")
     _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-    def _free_gib() -> float:
-        try:
-            return torch.cuda.mem_get_info()[0] / (1024 ** 3)
-        except Exception:  # never block startup on telemetry
-            return 0.0
-
     def _vram(tag: str) -> None:
         """Deploy probe: actual VRAM at a point in the job, never estimated.
 
@@ -386,32 +401,14 @@ else:
         except Exception:  # noqa: BLE001 — telemetry is best-effort
             pass
 
-    # Measured placement (2026-09-11, _vram probe on a 96 GiB card, both
-    # variants resident): torch_alloc=42.7 GiB at baseline => ~21.4 GiB per
-    # AukInfer for its full encoder+VAE+DiT, plus a ~2.9 GiB per-job working
-    # set. Build the default first, then the second only if it truly fits; an
-    # OOM mid-build degrades to single-variant instead of crashing.
-    #
-    # The gate reads mem_get_info, which reports the driver's view of free
-    # memory. That is the honest way to ask "will another model fit?", but it
-    # over-reports against torch's caching allocator (freed segments may still
-    # be reserved). The OOM fallback below is therefore load-bearing, not
-    # decorative.
+    # Single-resident placement (revised 2026-09-13). Each AukInfer is a full
+    # encoder+VAE+DiT stack — the 96 GiB probe once measured 42.7 GiB with
+    # both resident — and two stacks OOM a 32 GiB card. Exactly one model
+    # lives in VRAM: the default builds at import (cold start); a job asking
+    # for the other variant evicts the resident one first (_get_engine).
     primary = _default_variant()
-    secondary = "base" if primary == "flash" else "flash"
     _ENGINES[primary] = _build_engine(primary)
     _vram(f"after '{primary}' build")
-    if _DEVICE == "cuda" and _free_gib() >= SECOND_VARIANT_MIN_FREE_GIB:
-        try:
-            _ENGINES[secondary] = _build_engine(secondary)
-        except torch.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            print(
-                f"[auk-engine] '{secondary}' did not fit in free VRAM "
-                f"({_free_gib():.1f} GiB left) — single-variant mode "
-                f"(requests for it fail structured)",
-                flush=True,
-            )
     _log_system_info()
 
     def synthesize(req) -> tuple[bytes, dict[str, object]]:

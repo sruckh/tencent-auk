@@ -61,8 +61,8 @@ class Tensor:
 
 @pytest.fixture
 def make_real_engine(tmp_path, monkeypatch):
-    """Factory: bootstrap config (free VRAM, second-build failure) is frozen
-    at call time because the module bootstraps at import."""
+    """Factory: bootstrap config (probe VRAM reading, build-failure flag) is
+    frozen at call time because the module bootstraps at import."""
     explicit(tmp_path / "ckpts")
     monkeypatch.setenv("CKPT_ROOT", str(tmp_path / "ckpts"))
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
@@ -181,13 +181,13 @@ def test_flash_recipe_is_pinned_in_source():
     assert assignments["nfe"] == 4 and assignments["cfg_strength"] == 0.0
 
 
-def test_constructor_resolves_each_variant_and_encoder(make_real_engine):
+def test_constructor_builds_default_variant_only(make_real_engine):
     module, state = make_real_engine()
-    assert len(state.builds) == 2
-    assert {Path(row[1]).name for row in state.builds} == {"auk_flash.safetensors", "auk_base.safetensors"}
-    assert all(Path(row[2]).name == "Qwen2.5-Omni-3B" for row in state.builds)
+    assert len(state.builds) == 1
+    assert Path(state.builds[0][1]).name == "auk_flash.safetensors"
+    assert Path(state.builds[0][2]).name == "Qwen2.5-Omni-3B"
     module.synthesize(req(gen_seconds=0.5))
-    assert len(state.builds) == 2
+    assert len(state.builds) == 1
 
 
 def test_encoder_downcast_to_bf16_on_build(make_real_engine):
@@ -196,7 +196,7 @@ def test_encoder_downcast_to_bf16_on_build(make_real_engine):
     worker puts the frozen encoder back to bf16."""
     module, state = make_real_engine()
     handles = module._ENGINES
-    assert len(handles) == 2
+    assert len(handles) == 1
     for handle in handles.values():
         assert handle.model.text_encoder.dtype == "bfloat16"
 
@@ -235,15 +235,21 @@ def test_downcast_leaves_the_transformer_and_vae_alone():
     assert flushed == ["torch.cuda.empty_cache"]
 
 
-def test_low_free_vram_builds_primary_only(make_real_engine):
-    """A card too small for two AukInfer stacks keeps the second lazy.
-
-    Measured per-model cost is ~21.4 GiB, so 5 GiB free after the primary build
-    means no room for a second (~24 GB-class behaviour)."""
+def test_swap_evicts_resident_variant(make_real_engine):
+    """Single-resident placement: a job for the other variant evicts the
+    resident engine before building, so two AukInfers are never in VRAM."""
     module, state = make_real_engine(free_gib=5.0)
-    assert len(state.builds) == 1
-    wav, meta = module.synthesize(req(gen_seconds=0.5))
-    assert meta["model_variant"] == "flash" and len(state.builds) == 1
+    assert set(module._ENGINES) == {"flash"}
+    module.synthesize(req(model_variant="base", gen_seconds=0.5))
+    assert set(module._ENGINES) == {"base"}
+    assert [Path(b[1]).name for b in state.builds] == [
+        "auk_flash.safetensors", "auk_base.safetensors",
+    ]
+    module.synthesize(req(model_variant="flash", gen_seconds=0.5))
+    assert set(module._ENGINES) == {"flash"}
+    assert [Path(b[1]).name for b in state.builds] == [
+        "auk_flash.safetensors", "auk_base.safetensors", "auk_flash.safetensors",
+    ]
 
 
 def test_vram_probe_reports_build_and_generation(make_real_engine, capsys):
@@ -274,16 +280,15 @@ def test_vram_probe_never_breaks_inference(make_real_engine, capsys, monkeypatch
     assert "vram before generate" not in capsys.readouterr().out
 
 
-def test_second_variant_loads_lazily_on_request(make_real_engine):
-    module, state = make_real_engine(free_gib=5.0)
-    module.synthesize(req(model_variant="base", gen_seconds=0.5))
-    assert len(state.builds) == 2
-    assert Path(state.builds[1][1]).name == "auk_base.safetensors"
-
-
-def test_oom_on_second_build_degrades_to_single_variant(make_real_engine):
-    module, state = make_real_engine(free_gib=40.0, fail_second_build=True)
-    assert len(state.builds) == 1  # import completed with the primary only
+def test_oom_during_swap_fails_structured_and_recovers(make_real_engine):
+    """An OOM while building after eviction fails structured; the worker is
+    left engine-less and the next job rebuilds from empty VRAM."""
+    module, state = make_real_engine(fail_second_build=True)
+    with pytest.raises(module.EngineError) as exc:
+        module.synthesize(req(model_variant="base", gen_seconds=0.5))
+    assert exc.value.code == "inference_failed"
+    assert module._ENGINES == {}  # evicted, nothing replaced it
+    state.fail_second_build_with = None
     wav, meta = module.synthesize(req(gen_seconds=0.5))
     assert meta["model_variant"] == "flash"
 

@@ -316,7 +316,7 @@ variables. The two credential variables are **runtime-only** — never baked int
 ## How it works
 
 <p align="center">
-  <img src="./assets/readme/architecture.svg" width="100%" alt="Bootstrap resolves checkpoints offline-first from the network volume and builds warm engines; each job is validated, synthesized, and delivered">
+  <img src="./assets/readme/architecture.svg" width="100%" alt="Bootstrap resolves checkpoints offline-first from the network volume and builds a warm engine; each job is validated, synthesized, and delivered">
 </p>
 
 **Bootstrap (import time, once).** The engine resolves all three components — `tencent/AuK`, `tencent/AuK-Flash`,
@@ -335,11 +335,10 @@ WAV in memory → delivery. Temp files are removed in `finally`; the handler nev
 range `1..8`; metadata reports the effective `nfe=4`. AuK-Base honors `nfe` 16..64 (default 32) and `cfg_scale`
 1.0..5.0 (default 2.0).
 
-**GPU sizing matters more than the variant count.** Measured on an RTX PRO 6000 with both variants resident, and
-confirmed on a 23.5 GiB RTX 4090 with one:
+**GPU sizing.** Measured on an RTX PRO 6000 and confirmed on a 23.5 GiB RTX 4090 (flash):
 
 ```
-# RTX PRO 6000, both variants
+# RTX PRO 6000 — historical measurement with both variants resident (no longer attempted)
 vram before generate … free=59.1 of 95.0 GiB | torch_alloc=27.6 peak=27.6 GiB
 vram after  generate … free=59.0 of 95.0 GiB | torch_alloc=28.1 peak=30.5 GiB
 
@@ -349,15 +348,18 @@ vram after  generate   : free= 6.3 of 23.5 GiB | torch_alloc=14.2 peak=16.7 GiB
 ```
 
 So each resident variant costs **~13.8 GiB** — every `AukInfer` owns its own encoder + VAE + DiT — plus a
-**~2.9 GiB** per-job working set. Placement is decided at startup: the default variant loads eagerly and the
-second joins only if `SECOND_VARIANT_MIN_FREE_GIB` (25) stays free.
+**~2.9 GiB** per-job working set. Placement is therefore **single-resident**: exactly one model lives in VRAM.
+The default variant loads eagerly at startup; a job asking for the other evicts it first (drop the handle,
+`empty_cache()`, rebuild — a full model load from the volume cache). Stacking both needs ~43 GiB (the 96 GiB
+probe above once measured 42.7 GiB with both resident) and OOMs a 32 GiB card, so the worker never stacks them.
 
-| Card | One variant + job (~16.7 GiB) | Both variants + job (~30.5 GiB) |
-|------|:---:|:---:|
-| 24 GB class (RTX 4090, 23.5 GiB) | **yes — 6.3 GiB spare, verified** | no |
-| 48 GB class (A40 / L40S) | yes | yes |
-| 80 GB class (A100) | yes | yes |
-| 96 GB (RTX PRO 6000) | yes | yes |
+| Card | One variant + job (~16.7 GiB) |
+|------|:---:|
+| 24 GB class (RTX 4090, 23.5 GiB) | **yes — 6.3 GiB spare, verified** |
+| 32 GB class (RTX 5090) | yes |
+| 48 GB class (A40 / L40S) | yes |
+| 80 GB class (A100) | yes |
+| 96 GB (RTX PRO 6000) | yes |
 
 **On a single-variant pool, only the resident variant is usable.** A 24 GB card keeps `flash` and skips `base`;
 a request with `"model_variant": "base"` then tries to build that model on demand, does not fit, and fails with
