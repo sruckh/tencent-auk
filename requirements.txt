@@ -16,3 +16,10 @@ omegaconf>=2.3.0
 torchdiffeq
 x_transformers>=1.31.14    # pulls einops (also a flash-attn runtime dep)
 safetensors
+
+# qwen_omni_utils eagerly imports these in its audio module
+# (v2_5/audio_process.py), but upstream declares them only via the gradio
+# extra — worker-owned so reference-audio tasks (zero_shot_tts) work
+# headless. The image import smoke covers this chain (Dockerfile).
+librosa==0.11.0            # pulls audioread/numba/scipy
+av==18.1.0                 # PyAV: audio_process opens containers directly

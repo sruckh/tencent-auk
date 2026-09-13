@@ -349,6 +349,20 @@ def test_failure_scrubs_message_and_cleans_temp_audio(make_real_engine):
     assert not Path(state.calls[-1].clips[0]).exists()
 
 
+def test_import_error_names_the_missing_module(make_real_engine):
+    """Import failures carry the module name (safe, non-PII) so a missing
+    worker dependency is diagnosable from the wire error alone."""
+    module, state = make_real_engine()
+
+    def boom(messages, **kwargs):
+        raise ModuleNotFoundError("No module named 'librosa'", name="librosa")
+
+    module._ENGINES["flash"].generate = boom
+    with pytest.raises(module.EngineError) as exc:
+        module.synthesize(req())
+    assert exc.value.message == "synthesis failed: ModuleNotFoundError: librosa"
+
+
 @pytest.mark.parametrize("rate", [0, -1, True, 48000.5])
 def test_invalid_rate_rejected(make_real_engine, rate):
     module, state = make_real_engine()

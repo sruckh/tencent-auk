@@ -465,7 +465,13 @@ else:
         except EngineError:
             raise
         except Exception as exc:
-            # Exception text can contain audio paths, prompt text or credentials.
-            raise EngineError("inference_failed", f"synthesis failed: {type(exc).__name__}") from exc
+            # Exception text can contain audio paths, prompt text or credentials,
+            # so only the type is reported — except an ImportError's module name,
+            # which is safe and makes a missing dependency diagnosable from the
+            # wire error alone (e.g. qwen_omni_utils -> librosa).
+            detail = type(exc).__name__
+            if isinstance(exc, ImportError) and getattr(exc, "name", None):
+                detail += f": {exc.name}"
+            raise EngineError("inference_failed", f"synthesis failed: {detail}") from exc
         finally:
             _remove_temp(tmp_path)

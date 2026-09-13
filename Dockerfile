@@ -35,10 +35,12 @@ RUN pip install -r requirements.txt
 # inference deps are pinned in requirements.txt, and `pip check` is omitted
 # deliberately. No flash-attention wheel: the inference path pins
 # attn_backend="torch" (infer_auk.py). The import smoke runs in the image
-# build only, never on the authoring host.
+# build only, never on the authoring host; it also imports the
+# reference-audio util chain (qwen_omni_utils eager-imports librosa/av,
+# which the gradio extra ships but headless inference needs worker-side).
 COPY src/ /app/src/
 RUN pip install --no-deps /app/src \
-    && python3 -c "from auk.infer.infer_auk import AukInfer"
+    && python3 -c "from auk.infer.infer_auk import AukInfer; from qwen_omni_utils import process_mm_info"
 
 # Worker code last — changes here rebuild only this layer.
 COPY schema_validator.py engine.py storage.py handler.py /app/
