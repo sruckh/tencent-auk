@@ -183,22 +183,23 @@ def _metadata(wav_bytes: bytes, req, n_samples: int, sample_rate: int = SAMPLE_R
     }
 
 
+def _default_variant() -> str:
+    env = os.environ.get("DEFAULT_MODEL_VARIANT", "flash")
+    return env if env in ("flash", "base") else "flash"
+
+
 # ---------------------------------------------------------------------------
 # Temp-file helpers (the one sanctioned disk write: upstream consumes paths)
 # ---------------------------------------------------------------------------
 
 def _write_temp_audio(audio_bytes: bytes) -> str:
-    tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    try:
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp.write(audio_bytes)
-        tmp.flush()
-    finally:
-        tmp.close()
-    return tmp.name
+        return tmp.name
 
 
 def _remove_temp(path: str | None) -> None:
-    if path and os.path.exists(path):
+    if path:
         try:
             os.unlink(path)
         except OSError:
@@ -211,16 +212,12 @@ def _remove_temp(path: str | None) -> None:
 
 if _MODE == _MODE_MOCK:
 
-    def _default_variant() -> str:
-        env = os.environ.get("DEFAULT_MODEL_VARIANT", "flash")
-        return env if env in ("flash", "base") else "flash"
-
     def _mock_frequency(instruction: str) -> float:
         digest = int(hashlib.sha256(instruction.encode("utf-8")).hexdigest()[:8], 16)
         return 300.0 + (digest % 400)
 
-    def _mock_generate(req) -> int:
-        """Deterministic sine WAV built in-memory; returns sample count."""
+    def _mock_generate(req) -> tuple[bytes, int]:
+        """Deterministic sine WAV built in-memory; returns (wav_bytes, sample_count)."""
         seconds = req.gen_seconds if req.gen_seconds else 1.0
         seconds = min(max(seconds, 0.5), 5.0)
         n_samples = int(seconds * SAMPLE_RATE)
@@ -236,14 +233,7 @@ if _MODE == _MODE_MOCK:
             handle.setsampwidth(2)
             handle.setframerate(SAMPLE_RATE)
             handle.writeframes(bytes(frames))
-        _MOCK.last_wav = buf.getvalue()
-        return n_samples
-
-    class _MockEngine:
-        def __init__(self) -> None:
-            self.last_wav = b""
-
-    _MOCK = _MockEngine()
+        return buf.getvalue(), n_samples
 
     def _log_system_info() -> None:
         print(
@@ -257,12 +247,12 @@ if _MODE == _MODE_MOCK:
     def synthesize(req) -> tuple[bytes, dict[str, object]]:
         """Mock path: same contract as the real path, stdlib only."""
         try:
-            n_samples = _mock_generate(req)
+            wav_bytes, n_samples = _mock_generate(req)
         except EngineError:
             raise
         except Exception as exc:
             raise EngineError("inference_failed", f"mock synthesis failed: {exc}") from exc
-        return _MOCK.last_wav, _metadata(_MOCK.last_wav, req, n_samples)
+        return wav_bytes, _metadata(wav_bytes, req, n_samples)
 
 # ===========================================================================
 # REAL MODE — torch + upstream auk package; production only
@@ -271,10 +261,6 @@ if _MODE == _MODE_MOCK:
 else:
 
     import torch  # pyright: ignore[reportMissingImports]  # noqa: E402 — production dep; mock mode never imports it
-
-    def _default_variant() -> str:
-        env = os.environ.get("DEFAULT_MODEL_VARIANT", "flash")
-        return env if env in ("flash", "base") else "flash"
 
     def _build_engine(variant: str):
         from auk.infer.infer_auk import AukInfer  # pyright: ignore[reportMissingImports]  # real mode only

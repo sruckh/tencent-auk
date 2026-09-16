@@ -60,7 +60,7 @@ def build_key(job_id: str, cfg: "StorageConfig", *, now: _dt.datetime | None = N
     """Pinned template: ``{prefix}{YYYY}/{MM}/{DD}/{sanitized_job_id}-{uuid4}.wav``."""
     now = now or _dt.datetime.now(_dt.timezone.utc)
     uid = uuid4 or str(uuid.uuid4())
-    return f"{cfg.key_prefix}{now:%Y}/{now:%m}/{now:%d}/{sanitize_job_id(job_id)}-{uid}.wav"
+    return f"{cfg.key_prefix}{now:%Y/%m/%d}/{sanitize_job_id(job_id)}-{uid}.wav"
 
 
 class StorageConfig:
@@ -177,10 +177,6 @@ def resolve_delivery(response_delivery: str | None, cfg: StorageConfig) -> str:
     return "s3" if cfg.s3_configured() else "base64"  # auto: pin s3-storage.md
 
 
-def _expires_at(presign_expiry: int, now: _dt.datetime) -> str:
-    return (now + _dt.timedelta(seconds=presign_expiry)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def deliver(
     wav_bytes: bytes,
     job_id: str,
@@ -219,6 +215,7 @@ def deliver(
     except Exception as exc:
         raise DeliveryError("delivery_failed", f"upload failed: {type(exc).__name__}") from exc
 
+    now = _dt.datetime.now(_dt.timezone.utc)
     return {
         "delivery": "s3",
         "audio_url": url,
@@ -226,5 +223,5 @@ def deliver(
         "key": key,
         "size_bytes": len(wav_bytes),
         "url_expires_in": cfg.presign_expiry,
-        "url_expires_at": _expires_at(cfg.presign_expiry, _dt.datetime.now(_dt.timezone.utc)),
+        "url_expires_at": (now + _dt.timedelta(seconds=cfg.presign_expiry)).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }

@@ -39,11 +39,7 @@ TASKS = {
 VARIANTS = ("flash", "base")
 DELIVERY_OPTIONS = ("auto", "s3", "base64")
 URL_SCHEMES = ("http://", "https://")
-DATA_URL_MARKERS = (";base64,",)
 URL_CONNECT_TIMEOUT_S = 10
-
-# Task matrix: required / forbidden fields per resolved task
-_TASK_REQUIRES_AUDIO = {"content_edit", "acoustic_edit", "paralinguistic_edit", "enhancement", "separation"}
 
 
 class ValidationError(Exception):
@@ -89,13 +85,8 @@ class NormalizedRequest:
 # ---------------------------------------------------------------------------
 
 def _is_cjk(ch: str) -> bool:
-    code = ord(ch)
-    return (
-        0x3040 <= code <= 0x30FF      # kana
-        or 0x3400 <= code <= 0x4DBF   # CJK ext A
-        or 0x4E00 <= code <= 0x9FFF   # CJK unified
-        or 0xF900 <= code <= 0xFAFF   # CJK compat
-    )
+    c = ord(ch)
+    return 0x3040 <= c <= 0x30FF or 0x3400 <= c <= 0x4DBF or 0x4E00 <= c <= 0x9FFF or 0xF900 <= c <= 0xFAFF
 
 
 def estimate_duration_from_text(text: str) -> float:
@@ -134,20 +125,13 @@ def _ingest_audio(value: object, field: str, fetch_url: Callable[[str], bytes]) 
             raise
         except Exception as exc:  # timeouts, HTTP errors, socket errors
             raise ValidationError("audio_download_failed", f"failed to download {field}: {type(exc).__name__}", field=field) from exc
-        if len(data) > MAX_AUDIO_BYTES:
-            raise ValidationError("audio_too_large", f"decoded {field} exceeds {MAX_AUDIO_BYTES} bytes", field=field)
-        return data
-    payload = value
-    for marker in DATA_URL_MARKERS:
-        idx = payload.find(marker)
-        if idx != -1:
-            payload = payload[idx + len(marker):]
-            break
-    try:
-        # Single-pass decode: these bytes are reused by engine and storage.
-        data = base64.b64decode(payload, validate=True)
-    except Exception as exc:
-        raise ValidationError("invalid_base64", f"{field} is not valid base64", field=field) from exc
+    else:
+        payload = value.split(";base64,", 1)[-1]
+        try:
+            # Single-pass decode: these bytes are reused by engine and storage.
+            data = base64.b64decode(payload, validate=True)
+        except Exception as exc:
+            raise ValidationError("invalid_base64", f"{field} is not valid base64", field=field) from exc
     if len(data) > MAX_AUDIO_BYTES:
         raise ValidationError("audio_too_large", f"decoded {field} exceeds {MAX_AUDIO_BYTES} bytes", field=field)
     return data

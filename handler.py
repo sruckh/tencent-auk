@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import sys
 import traceback
-from typing import cast
 
 try:
     import runpod  # pyright: ignore[reportMissingImports]  # platform SDK — production image installs it (stage 05)
@@ -75,12 +74,8 @@ def handler(job: dict[str, object]) -> dict[str, object]:
 
     try:
         wav_bytes, metadata = engine.synthesize(req)
-    except engine.EngineError as exc:
-        return {"error": {"code": exc.code, "message": exc.message}}
-
-    try:
         delivery = storage.deliver(wav_bytes, job_id, req.response_delivery)
-    except storage.DeliveryError as exc:
+    except (engine.EngineError, storage.DeliveryError) as exc:
         return {"error": {"code": exc.code, "message": exc.message}}
 
     return {**delivery, **metadata}
@@ -116,12 +111,11 @@ def _log_result_shape(job_id: str, result: dict[str, object]) -> None:
     if isinstance(error, str):
         try:
             loaded = json.loads(error)
+            if isinstance(loaded, dict):
+                detail = f" error_code={loaded.get('code')} error_message={loaded.get('message')!r}"
+            else:
+                detail = f" error={error!r}"
         except ValueError:
-            loaded = None
-        if isinstance(loaded, dict):
-            fields = cast("dict[str, object]", loaded)
-            detail = f" error_code={fields.get('code')} error_message={fields.get('message')!r}"
-        else:
             detail = f" error={error!r}"
     print(
         f"[auk-worker] result job_id={job_id} json_bytes={len(rendered)} "
